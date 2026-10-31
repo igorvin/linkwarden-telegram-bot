@@ -24,7 +24,33 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 LINKWARDEN_API_URL = os.environ.get('LINKWARDEN_API_URL')
 LINKWARDEN_API_KEY = os.environ.get('LINKWARDEN_API_KEY')
 LINKWARDEN_COLLECTION_ID = os.environ.get('LINKWARDEN_COLLECTION_ID')
+ALLOWED_TELEGRAM_USER_ID = os.environ.get('ALLOWED_TELEGRAM_USER_ID')
 
+if not ALLOWED_TELEGRAM_USER_ID or not ALLOWED_TELEGRAM_USER_ID.isdecimal():
+    logger.error("Invalid or missing ALLOWED_TELEGRAM_USER_ID")
+    sys.exit(1)
+
+ALLOWED_TELEGRAM_USER_ID = int(ALLOWED_TELEGRAM_USER_ID)
+
+
+def is_authorized(update: Update) -> bool:
+    user = update.effective_user
+    chat = update.effective_chat
+
+    authorized = (
+        user is not None
+        and chat is not None
+        and user.id == ALLOWED_TELEGRAM_USER_ID
+        and chat.type == "private"
+    )
+
+    if not authorized:
+        logger.warning(
+            "Unauthorized Telegram request from user_id=%s",
+            user.id if user else None
+        )
+
+    return authorized
 # Validate required environment variables
 if not all([TELEGRAM_TOKEN, LINKWARDEN_API_URL, LINKWARDEN_API_KEY, LINKWARDEN_COLLECTION_ID]):
     logger.error("Missing required environment variables: TELEGRAM_TOKEN, LINKWARDEN_API_URL, LINKWARDEN_API_KEY, LINKWARDEN_COLLECTION_ID")
@@ -71,6 +97,8 @@ def validate_api_url() -> None:
 validate_api_url()
 
 async def start(update: Update, context: CallbackContext) -> None:
+    if not is_authorized(update):
+        return
     await context.bot.send_message(chat_id=update.effective_chat.id, 
                                    text="Send me a message with links, and I'll add them to Linkwarden!")
 
@@ -155,16 +183,31 @@ def add_to_linkwarden(url: str) -> bool:
             response.raise_for_status()
             
             # Validate response structure
+            # Validate Linkwarden API response
             try:
                 resp_json = response.json()
-                if 'id' not in resp_json:
-                    logger.warning(f"Unexpected API response: missing 'id' field")
+
+                link_data = (
+                    resp_json.get("response")
+                    if isinstance(resp_json, dict)
+                    else None
+                )
+
+                if not isinstance(link_data, dict) or not isinstance(link_data.get("id"), int):
+                    logger.warning(
+                        "Unexpected API response: HTTP=%s, missing valid response.id",
+                        response.status_code
+                    )
                     return False
+
             except ValueError:
-                logger.warning(f"Unexpected API response format")
+                logger.warning("Invalid JSON response from Linkwarden")
                 return False
-            
-            logger.info(f"Successfully added link to Linkwarden")
+
+            logger.info(
+                "Successfully added link to Linkwarden, ID=%s",
+                link_data["id"]
+            )
             return True
         except requests.exceptions.Timeout:
             if attempt < max_retries - 1:
@@ -212,6 +255,8 @@ def check_rate_limit(user_id: int) -> bool:
 
 async def handle_message(update: Update, context: CallbackContext) -> None:
     """Handle incoming messages with rate limiting and validation."""
+    if not is_authorized(update):
+        return
     user_id = update.effective_user.id
     
     # Rate limiting check
