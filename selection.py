@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from itertools import islice
+import json
 import secrets
 import time
 
@@ -7,6 +8,16 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 PAGE_SIZE = 8
 SESSION_TTL = 3600
+
+
+def parse_topic_collections(value):
+    mapping = json.loads(value or "{}")
+    if not isinstance(mapping, dict):
+        raise ValueError("Expected an object")
+    if any(not key.isdecimal() or int(key) <= 0 or type(collection) is not int
+           or collection <= 0 for key, collection in mapping.items()):
+        raise ValueError("Topic and collection IDs must be positive integers")
+    return {int(key): collection for key, collection in mapping.items()}
 
 
 @dataclass
@@ -19,6 +30,7 @@ class Draft:
     source_message_id: int
     session_id: str = field(default_factory=lambda: secrets.token_urlsafe(9))
     message_id: int | None = None
+    bound_collection: int | None = None
     stage: str = "collections"
     tags: dict = field(default_factory=dict)
     chosen: dict = field(default_factory=dict)
@@ -52,6 +64,7 @@ class Draft:
                 text += "Выберите коллекцию"
             elif self.stage == "tags":
                 items = self.tags
+                text += f"Коллекция: {self.collections[self.collection][:200]} (#{self.collection})\n"
                 text += "Отметьте теги и нажмите «Готово»"
             else:
                 items = self.chosen
@@ -77,7 +90,7 @@ class Draft:
                 rows.append([button("Готово", "done")])
             elif self.stage == "confirm":
                 rows.append([button("Сохранить", "save")])
-        if self.stage != "collections":
+        if self.stage == "confirm" or (self.stage == "tags" and self.bound_collection is None):
             rows.append([button("Назад", "back")])
         rows.append([button("Отмена", "cancel")])
         return {"text": text, "reply_markup": InlineKeyboardMarkup(rows),

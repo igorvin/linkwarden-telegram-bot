@@ -8,7 +8,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 from telegram.error import Conflict, TelegramError, TimedOut, NetworkError
 from linkwarden import ApiError, get_collections, get_tags
 from submissions import save_once
-from selection import Draft, SESSION_TTL
+from selection import Draft, SESSION_TTL, parse_topic_collections
 from dataclasses import replace
 import re
 from urllib.parse import urlparse
@@ -36,6 +36,13 @@ ALLOWED_TELEGRAM_USER_ID = int(ALLOWED_TELEGRAM_USER_ID)
 ALLOWED_TELEGRAM_GROUP_ID = int(
     os.environ.get("ALLOWED_TELEGRAM_GROUP_ID", "0")
 )
+
+try:
+    TOPIC_COLLECTIONS = parse_topic_collections(os.environ.get("TELEGRAM_TOPIC_COLLECTIONS", ""))
+except (ValueError, TypeError):
+    logger.error("Invalid TELEGRAM_TOPIC_COLLECTIONS configuration")
+    sys.exit(1)
+
 
 def is_authorized(update: Update) -> bool:
     user = update.effective_user
@@ -225,6 +232,11 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
     thread_id = original.message_thread_id
     collections, error = await load_collections()
+    bound_collection = (
+        TOPIC_COLLECTIONS.get(thread_id)
+        if update.effective_chat.type in ("group", "supergroup")
+        and chat_id == ALLOWED_TELEGRAM_GROUP_ID else None
+    )
     for link in links:
         if len(link) > 2048:
             await send_message_with_retry(update, context, "Ссылка длиннее 2048 символов.")
@@ -233,7 +245,9 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
                and draft.url == link for draft in sessions.values()):
             continue
         draft = Draft(link, collections, user_id, chat_id, thread_id,
-                      original.message_id, error=error)
+                      original.message_id, error=error, bound_collection=bound_collection)
+        if bound_collection is not None and not error:
+            await select_bound_collection(draft)
         # Register before sending. A timed-out send may still deliver its buttons.
         sessions[draft.session_id] = draft
         try:
@@ -261,6 +275,14 @@ async def load_collections():
         return items, "" if items else "Нет доступных для записи коллекций."
     except ApiError as error:
         return {}, str(error)
+
+
+async def select_bound_collection(draft):
+    if draft.bound_collection not in draft.collections:
+        draft.error = "Привязанная коллекция недоступна. Проверьте настройки темы или права Linkwarden."
+        return
+    draft.collection = draft.bound_collection
+    await load_tags(draft)
 
 
 async def load_tags(draft):
@@ -348,6 +370,8 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
         elif operation == "retry":
             if changed.stage == "collections":
                 changed.collections, changed.error = await load_collections()
+                if changed.bound_collection is not None and not changed.error:
+                    await select_bound_collection(changed)
             else:
                 await load_tags(changed)
         elif operation in ("next", "prev"):

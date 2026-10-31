@@ -448,3 +448,91 @@ async def test_multiple_sessions_are_independent(update, context, workflow):
     workflow[1].assert_not_called()
     assert second.owner_id == 201 and first.owner_id == 200
     workflow[2].assert_not_called()
+
+@pytest.mark.parametrize("text,expected", [("", {}), ("{}", {}), ('{"9":1}', {9: 1}), ('{"9":1,"15":2}', {9: 1, 15: 2})])
+def test_topic_mapping_config(text, expected):
+    from selection import parse_topic_collections
+    assert parse_topic_collections(text) == expected
+
+
+@pytest.mark.parametrize("text", ["[]", "null", '{"0":1}', '{"9":0}', '{"9":true}', '{"9":"1"}', '{"bad":1}', "{"])
+def test_invalid_topic_mapping(text):
+    from selection import parse_topic_collections
+    with pytest.raises((ValueError, TypeError)):
+        parse_topic_collections(text)
+
+
+@pytest.mark.asyncio
+async def test_bound_topic_skips_collection_and_locks_back(update, context, workflow, monkeypatch):
+    monkeypatch.setattr(bot, "TOPIC_COLLECTIONS", {9: 2})
+    group(update, thread=9)
+    await bot.handle_message(update, context)
+    session = draft(context)
+    assert session.collection == 2 and session.stage == "tags"
+    assert not any(action == ("back", None) for action in session.actions.values())
+    assert "Fishing" in update.message.reply_text.await_args.kwargs["text"]
+    assert update.message.reply_text.await_args.kwargs["message_thread_id"] == 9
+    await press(update, context, "pick", 3)
+    await press(update, context, "done")
+    await press(update, context, "back")
+    assert draft(context).stage == "tags" and draft(context).chosen == {3: "Knots"}
+    assert not any(action == ("back", None) for action in draft(context).actions.values())
+    await press(update, context, "done")
+    await press(update, context, "save")
+    workflow[2].assert_called_once_with("https://example.com", 2, {3: "Knots"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private,thread", [(True, 9), (False, 42), (False, None)])
+async def test_topic_binding_does_not_affect_other_chats(update, context, workflow, monkeypatch, private, thread):
+    monkeypatch.setattr(bot, "TOPIC_COLLECTIONS", {9: 2})
+    if private:
+        update.message.message_thread_id = thread
+    else:
+        group(update, thread=thread)
+    await bot.handle_message(update, context)
+    assert draft(context).stage == "collections"
+    assert draft(context).bound_collection is None
+    workflow[1].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bound_collection_missing_then_retry(update, context, workflow, monkeypatch):
+    monkeypatch.setattr(bot, "TOPIC_COLLECTIONS", {9: 2})
+    group(update, thread=9)
+    workflow[0].side_effect = [{1: "Inbox"}, {2: "Fishing"}]
+    await bot.handle_message(update, context)
+    assert draft(context).error
+    workflow[1].assert_not_called()
+    assert all(action != "pick" for action, _ in draft(context).actions.values())
+    await press(update, context, "retry")
+    assert draft(context).stage == "tags" and draft(context).collection == 2
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bound_fetch_errors_and_empty_tags(update, context, workflow, monkeypatch):
+    monkeypatch.setattr(bot, "TOPIC_COLLECTIONS", {9: 2})
+    group(update, thread=9)
+    workflow[0].side_effect = [ApiError("HTTP 503"), {2: "Fishing"}]
+    workflow[1].side_effect = [ApiError("HTTP 401"), {}]
+    await bot.handle_message(update, context)
+    await press(update, context, "retry")
+    assert draft(context).stage == "tags" and draft(context).error == "HTTP 401"
+    assert all(action != "back" for action, _ in draft(context).actions.values())
+    await press(update, context, "retry")
+    assert draft(context).stage == "confirm"
+    await press(update, context, "save")
+    workflow[2].assert_called_once_with("https://example.com", 2, {})
+
+
+@pytest.mark.asyncio
+async def test_bound_topic_still_rejects_other_member(update, context, workflow, monkeypatch):
+    monkeypatch.setattr(bot, "TOPIC_COLLECTIONS", {9: 2})
+    group(update, thread=9)
+    await bot.handle_message(update, context)
+    data = data_for(context, "done")
+    update.effective_user.id = 201
+    await press(update, context, data=data)
+    assert draft(context).stage == "tags"
+    workflow[2].assert_not_called()

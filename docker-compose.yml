@@ -15,6 +15,7 @@ services:
       - LINKWARDEN_API_KEY=${LINKWARDEN_API_KEY}
       - ALLOWED_TELEGRAM_USER_ID=${ALLOWED_TELEGRAM_USER_ID}
       - ALLOWED_TELEGRAM_GROUP_ID=${ALLOWED_TELEGRAM_GROUP_ID:-0}
+      - TELEGRAM_TOPIC_COLLECTIONS=${TELEGRAM_TOPIC_COLLECTIONS:-}
       - BOT_STATE_PATH=/app/data/submissions.sqlite3
     volumes:
       - bot-state:/app/data

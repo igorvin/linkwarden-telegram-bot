@@ -68,7 +68,7 @@ python bot.py
 
 Send HTTP/HTTPS links in a private chat or the configured group. The bot fetches collections and tags from Linkwarden, then presents a separate selection session for each URL. Choose one collection, toggle zero or more tags, review the URL and selections, and click Save. Back returns to the previous step and Cancel discards the draft.
 
-Private messages are restricted to ALLOWED_TELEGRAM_USER_ID. Normal members of ALLOWED_TELEGRAM_GROUP_ID may submit links. Messages from bots, anonymous administrators, channel identities, and other groups are rejected. Only the original submitter can operate their session, including when another group member is the configured private-chat owner. Replies stay in the original topic using message_thread_id. Topics are not mapped to collection or tag IDs.
+Private messages are restricted to ALLOWED_TELEGRAM_USER_ID. Normal members of ALLOWED_TELEGRAM_GROUP_ID may submit links. Messages from bots, anonymous administrators, channel identities, and other groups are rejected. Only the original submitter can operate their session, including when another group member is the configured private-chat owner. Replies stay in the original topic using message_thread_id. Optional TELEGRAM_TOPIC_COLLECTIONS maps topic IDs to collection IDs in the configured group. For example, {"9":1} sends topic 9 to collection 1. Bound topics skip the collection picker and keep tag selection and confirmation. Back cannot change a bound collection. Missing or inaccessible bound collections produce an error with retry and cancel. Other topics and private chats retain the collection picker.
 
 Sessions expire after one hour or a bot restart. Stale, forged, wrong-message, and wrong-topic callbacks are rejected. Telegram group privacy settings must allow the bot to receive the messages containing URLs.
 
@@ -94,6 +94,7 @@ python -m pytest -q -o asyncio_default_fixture_loop_scope=function
 | `LINKWARDEN_API_KEY` | Yes | - | Linkwarden API key |
 | `ALLOWED_TELEGRAM_USER_ID` | Yes | - | Numeric Telegram user ID allowed in private chat |
 | `ALLOWED_TELEGRAM_GROUP_ID` | No | `0` | Authorized group ID, 0 disables groups |
+| `TELEGRAM_TOPIC_COLLECTIONS` | No | `{}` | JSON topic-to-collection mapping in the authorized group |
 | `BOT_STATE_PATH` | No | `data/submissions.sqlite3` | Durable submission journal, /app/data/submissions.sqlite3 in Compose |
 | `LOG_LEVEL` | No | `WARNING` | Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
 | `RATE_LIMIT_THRESHOLD` | No | `10` | Max messages per user per window |
