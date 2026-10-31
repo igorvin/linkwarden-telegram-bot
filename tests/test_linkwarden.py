@@ -94,3 +94,42 @@ def test_save_failure_never_reposts(transport, failure):
     with pytest.raises(ApiError):
         save_link("https://example.com", 1, {})
     transport.assert_called_once()
+
+def test_find_link_paginates_and_compares_exactly(transport):
+    from linkwarden import find_link
+    transport.side_effect = [
+        response({"response": [{"id": 7, "url": "https://example.com/longer"}]}),
+        response({"response": [{"id": 3, "url": "https://example.com"}]}),
+    ]
+    assert find_link("https://example.com") == 3
+    assert transport.call_args.kwargs["params"] == {
+        "searchQueryString": "https://example.com", "cursor": 7
+    }
+
+
+def test_find_link_unknown_schema_is_not_an_empty_result(transport):
+    from linkwarden import find_link
+    transport.return_value = response({"data": {"links": []}})
+    with pytest.raises(ApiError):
+        find_link("https://example.com")
+
+
+def test_find_link_repeated_page(transport):
+    from linkwarden import find_link
+    transport.return_value = response({"response": [{"id": 7, "url": "https://other.com"}]})
+    with pytest.raises(ApiError):
+        find_link("https://example.com")
+
+
+def test_unknown_post_outcome_is_reported(transport):
+    transport.side_effect = requests.Timeout()
+    with pytest.raises(ApiError) as caught:
+        save_link("https://example.com", 1, {})
+    assert caught.value.outcome_unknown
+
+
+def test_get_error_does_not_claim_unknown_save(transport):
+    transport.side_effect = requests.Timeout()
+    with pytest.raises(ApiError) as caught:
+        get_tags()
+    assert not caught.value.outcome_unknown

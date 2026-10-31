@@ -6,12 +6,19 @@ import time
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 PAGE_SIZE = 8
+SESSION_TTL = 3600
 
 
 @dataclass
 class Draft:
     url: str
     collections: dict
+    owner_id: int
+    chat_id: int
+    thread_id: int | None
+    source_message_id: int
+    session_id: str = field(default_factory=lambda: secrets.token_urlsafe(9))
+    message_id: int | None = None
     stage: str = "collections"
     tags: dict = field(default_factory=dict)
     chosen: dict = field(default_factory=dict)
@@ -19,22 +26,26 @@ class Draft:
     page: int = 0
     revision: str = ""
     created: float = field(default_factory=time.monotonic)
-    actions: set = field(default_factory=set)
+    actions: dict = field(default_factory=dict)
     error: str = ""
+    busy: bool = False
 
     def view(self):
-        self.revision = secrets.token_hex(6)
-        self.actions.clear()
+        self.revision = secrets.token_hex(4)
+        self.actions = {}
         rows = []
 
-        def button(label, action):
-            self.actions.add(action)
-            return InlineKeyboardButton(label, callback_data=f"lw:{self.revision}:{action}")
+        def button(label, action, value=None):
+            token = secrets.token_urlsafe(4)
+            self.actions[token] = (action, value)
+            return InlineKeyboardButton(
+                label, callback_data=f"lw:{self.session_id}:{self.revision}:{token}"
+            )
 
         text = self.url + "\n\n"
         if self.error:
             text += self.error
-            rows.append([button("Обновить", "retry")])
+            rows.append([button("Повторить загрузку", "retry")])
         else:
             if self.stage == "collections":
                 items = self.collections
@@ -52,7 +63,7 @@ class Draft:
                     text += "\n• " + name[:75]
                 else:
                     mark = "✓ " if self.stage == "tags" and item_id in self.chosen else ""
-                    rows.append([button(mark + name[:60], f"pick:{item_id}")])
+                    rows.append([button(mark + name[:60], "pick", item_id)])
             pages = max(1, (len(items) + PAGE_SIZE - 1) // PAGE_SIZE)
             if pages > 1:
                 text += f"\nСтраница {self.page + 1} из {pages}"
@@ -66,6 +77,8 @@ class Draft:
                 rows.append([button("Готово", "done")])
             elif self.stage == "confirm":
                 rows.append([button("Сохранить", "save")])
+        if self.stage != "collections":
+            rows.append([button("Назад", "back")])
         rows.append([button("Отмена", "cancel")])
         return {"text": text, "reply_markup": InlineKeyboardMarkup(rows),
                 "disable_web_page_preview": True}

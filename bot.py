@@ -4,13 +4,14 @@ import time
 import asyncio
 import sys
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, CallbackContext
 from telegram.error import Conflict, TelegramError, TimedOut, NetworkError
-import requests
+from linkwarden import ApiError, get_collections, get_tags
+from submissions import save_once
+from selection import Draft, SESSION_TTL
+from dataclasses import replace
 import re
 from urllib.parse import urlparse
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -23,7 +24,6 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 LINKWARDEN_API_URL = os.environ.get('LINKWARDEN_API_URL')
 LINKWARDEN_API_KEY = os.environ.get('LINKWARDEN_API_KEY')
-LINKWARDEN_COLLECTION_ID = os.environ.get('LINKWARDEN_COLLECTION_ID')
 ALLOWED_TELEGRAM_USER_ID = os.environ.get('ALLOWED_TELEGRAM_USER_ID')
 
 if not ALLOWED_TELEGRAM_USER_ID or not ALLOWED_TELEGRAM_USER_ID.isdecimal():
@@ -64,8 +64,8 @@ def is_authorized(update: Update) -> bool:
     return False
 
 # Validate required environment variables
-if not all([TELEGRAM_TOKEN, LINKWARDEN_API_URL, LINKWARDEN_API_KEY, LINKWARDEN_COLLECTION_ID]):
-    logger.error("Missing required environment variables: TELEGRAM_TOKEN, LINKWARDEN_API_URL, LINKWARDEN_API_KEY, LINKWARDEN_COLLECTION_ID")
+if not all([TELEGRAM_TOKEN, LINKWARDEN_API_URL, LINKWARDEN_API_KEY]):
+    logger.error("Missing required environment variables: TELEGRAM_TOKEN, LINKWARDEN_API_URL, LINKWARDEN_API_KEY")
     sys.exit(1)
 
 # Rate limiting: max 10 messages per user per minute
@@ -75,18 +75,6 @@ user_message_history = defaultdict(list)
 
 # Message size limit (50KB)
 MAX_MESSAGE_SIZE = int(os.environ.get('MAX_MESSAGE_SIZE', 51200))
-
-# Configure requests to retry on failure
-retry_strategy = Retry(
-    total=3,
-    status_forcelist=[429, 500, 502, 503, 504],
-    allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
-    backoff_factor=1
-)
-adapter = HTTPAdapter(max_retries=retry_strategy)
-http = requests.Session()
-http.mount("https://", adapter)
-http.mount("http://", adapter)
 
 # SSRF protection: validate Linkwarden API URL
 def validate_api_url() -> None:
@@ -111,8 +99,11 @@ validate_api_url()
 async def start(update: Update, context: CallbackContext) -> None:
     if not is_authorized(update):
         return
-    await context.bot.send_message(chat_id=update.effective_chat.id, 
-                                   text="Send me a message with links, and I'll add them to Linkwarden!")
+    await send_message_with_retry(
+        update, context,
+        "Пришлите URL, выберите коллекцию и теги, затем подтвердите сохранение."
+    )
+
 
 def extract_links(text: str) -> list:
     """Extract URLs from text using urllib.parse for better validation."""
@@ -170,82 +161,6 @@ def extract_links(text: str) -> list:
     
     return valid_urls
 
-def add_to_linkwarden(url: str) -> bool:
-    """Add link to Linkwarden with validation and error handling."""
-    headers = {
-        'Authorization': f'Bearer {LINKWARDEN_API_KEY}',
-        'Content-Type': 'application/json',
-        'User-Agent': 'linkwarden-telegram-bot/1.0',  # Identify bot
-        'Accept': 'application/json',
-    }
-    data = {
-        'url': url,
-        'collectionId': LINKWARDEN_COLLECTION_ID,
-    }
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            response = http.post(
-                f'{LINKWARDEN_API_URL}/api/v1/links',
-                json=data,
-                headers=headers,
-                timeout=10,
-                verify=True  # Always verify SSL certificates
-            )
-            response.raise_for_status()
-            
-            # Validate response structure
-            # Validate Linkwarden API response
-            try:
-                resp_json = response.json()
-
-                link_data = (
-                    resp_json.get("response")
-                    if isinstance(resp_json, dict)
-                    else None
-                )
-
-                if not isinstance(link_data, dict) or not isinstance(link_data.get("id"), int):
-                    logger.warning(
-                        "Unexpected API response: HTTP=%s, missing valid response.id",
-                        response.status_code
-                    )
-                    return False
-
-            except ValueError:
-                logger.warning("Invalid JSON response from Linkwarden")
-                return False
-
-            logger.info(
-                "Successfully added link to Linkwarden, ID=%s",
-                link_data["id"]
-            )
-            return True
-        except requests.exceptions.Timeout:
-            if attempt < max_retries - 1:
-                logger.warning(f"Attempt {attempt + 1} failed: Timeout. Retrying...")
-                time.sleep(2 ** attempt)
-            else:
-                logger.error(f"Failed to add link after {max_retries} attempts: Timeout")
-                return False
-        except requests.exceptions.ConnectionError:
-            logger.error(f"Connection error occurred while adding link")
-            return False
-        except requests.exceptions.SSLError:
-            logger.error(f"SSL certificate verification failed for Linkwarden API")
-            return False
-        except requests.exceptions.HTTPError as e:
-            if response.status_code == 401:
-                logger.error(f"Authentication failed: Invalid API key")
-            elif response.status_code == 403:
-                logger.error(f"Authorization failed: Check API key permissions")
-            else:
-                logger.error(f"HTTP {response.status_code} error occurred")
-            return False
-        except requests.RequestException:
-            logger.error(f"Failed to add link to Linkwarden")
-            return False
-
 def check_rate_limit(user_id: int) -> bool:
     """Check if user has exceeded rate limit."""
     now = datetime.now()
@@ -289,7 +204,7 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
         logger.warning(f"User {user_id} attempted to send suspicious content")
         return
 
-    links = extract_links(message)
+    links = list(dict.fromkeys(extract_links(message)))
     
     if not links:
         await send_message_with_retry(update, context, "No links found in the message.")
@@ -305,20 +220,154 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
         logger.warning(f"User {user_id} sent {len(links)} links (limit: {MAX_LINKS_PER_MESSAGE})")
         return
 
-    successful_links = 0
-    failed_links = 0
-
+    sessions = active_sessions(context)
+    original = update.effective_message
+    chat_id = update.effective_chat.id
+    thread_id = original.message_thread_id
+    collections, error = await load_collections()
     for link in links:
-        if add_to_linkwarden(link):
-            successful_links += 1
-        else:
-            failed_links += 1
+        if len(link) > 2048:
+            await send_message_with_retry(update, context, "Ссылка длиннее 2048 символов.")
+            continue
+        if any(draft.chat_id == chat_id and draft.source_message_id == original.message_id
+               and draft.url == link for draft in sessions.values()):
+            continue
+        draft = Draft(link, collections, user_id, chat_id, thread_id,
+                      original.message_id, error=error)
+        # Register before sending. A timed-out send may still deliver its buttons.
+        sessions[draft.session_id] = draft
+        try:
+            sent = await original.reply_text(
+                **draft.view(), message_thread_id=thread_id
+            )
+            draft.message_id = sent.message_id
+        except TelegramError:
+            del sessions[draft.session_id]
+            raise
 
-    response = f"✅ Added {successful_links} link(s) to Linkwarden"
-    if failed_links:
-        response += f"\n\n⚠️ Failed to add {failed_links} link(s)"
 
-    await send_message_with_retry(update, context, response)
+def active_sessions(context):
+    sessions = context.bot_data.setdefault("selection_sessions", {})
+    now = time.monotonic()
+    for session_id, draft in list(sessions.items()):
+        if not draft.busy and now - draft.created >= SESSION_TTL:
+            del sessions[session_id]
+    return sessions
+
+
+async def load_collections():
+    try:
+        items = await asyncio.to_thread(get_collections)
+        return items, "" if items else "Нет доступных для записи коллекций."
+    except ApiError as error:
+        return {}, str(error)
+
+
+async def load_tags(draft):
+    draft.stage = "tags"
+    draft.page = 0
+    try:
+        draft.tags = await asyncio.to_thread(get_tags)
+        draft.chosen = {key: name for key, name in draft.tags.items() if key in draft.chosen}
+        draft.error = ""
+        if not draft.tags:
+            draft.stage = "confirm"
+    except ApiError as error:
+        draft.error = str(error)
+
+
+async def answer_callback(query, text=None):
+    try:
+        await query.answer(text)
+    except TelegramError:
+        logger.warning("Could not acknowledge callback")
+
+
+async def handle_callback(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    if not is_authorized(update):
+        await answer_callback(query, "Нет доступа.")
+        return
+
+    sessions = active_sessions(context)
+    parts = query.data.split(":") if isinstance(query.data, str) else []
+    draft = sessions.get(parts[1]) if len(parts) == 4 and parts[0] == "lw" else None
+    if draft is None:
+        await answer_callback(query, "Сессия истекла. Отправьте URL заново.")
+        return
+    if update.effective_user.id != draft.owner_id:
+        await answer_callback(query, "Кнопки доступны только отправителю ссылки.")
+        return
+    message = query.message
+    if (message is None or update.effective_chat.id != draft.chat_id
+            or message.message_id != draft.message_id
+            or message.message_thread_id != draft.thread_id):
+        await answer_callback(query, "Кнопка не относится к этому сообщению.")
+        return
+    action = draft.actions.get(parts[3])
+    if parts[2] != draft.revision or action is None:
+        await answer_callback(query, "Эта кнопка устарела.")
+        return
+    if draft.busy:
+        await answer_callback(query, "Действие уже выполняется.")
+        return
+
+    draft.busy = True
+    try:
+        await answer_callback(query)
+        operation, value = action
+        if operation == "cancel":
+            del sessions[draft.session_id]
+            await query.edit_message_text("Отменено.")
+            return
+        if operation == "save":
+            del sessions[draft.session_id]
+            try:
+                link_id, created = await asyncio.to_thread(
+                    save_once, draft.url, draft.collection, draft.chosen
+                )
+                text = (f"Ссылка сохранена в Linkwarden (#{link_id})." if created else
+                        f"Ссылка уже есть в Linkwarden (#{link_id}). Новая копия не создана.")
+            except ApiError as error:
+                text = str(error)
+                if error.outcome_unknown:
+                    text += " Результат сохранения неизвестен. Проверьте Linkwarden."
+            await query.edit_message_text(text)
+            return
+
+        changed = replace(draft, chosen=draft.chosen.copy(), actions={}, busy=False)
+        if operation == "back":
+            changed.page = 0
+            changed.error = ""
+            if draft.stage == "confirm":
+                await load_tags(changed)
+                changed.stage = "tags"
+            else:
+                changed.stage = "collections"
+                changed.collections, changed.error = await load_collections()
+        elif operation == "retry":
+            if changed.stage == "collections":
+                changed.collections, changed.error = await load_collections()
+            else:
+                await load_tags(changed)
+        elif operation in ("next", "prev"):
+            changed.page += 1 if operation == "next" else -1
+        elif operation == "done":
+            changed.stage = "confirm"
+            changed.page = 0
+        elif operation == "pick":
+            if changed.stage == "collections":
+                changed.collection = value
+                await load_tags(changed)
+            elif value in changed.chosen:
+                del changed.chosen[value]
+            else:
+                changed.chosen[value] = changed.tags[value]
+        await query.edit_message_text(**changed.view())
+        sessions[draft.session_id] = changed
+    finally:
+        draft.busy = False
+
 
 async def send_message_with_retry(
     update: Update,
@@ -334,7 +383,7 @@ async def send_message_with_retry(
 
     for attempt in range(max_retries):
         try:
-            await message.reply_text(text)
+            await message.reply_text(text, message_thread_id=message.message_thread_id)
             return
 
         except TimedOut as e:
@@ -389,7 +438,8 @@ async def error_handler(
 
     try:
         await message.reply_text(
-            "An error occurred while processing your request."
+            "An error occurred while processing your request.",
+            message_thread_id=message.message_thread_id
         )
     except TelegramError as e:
         logger.error(
@@ -397,10 +447,11 @@ async def error_handler(
             e
         )
 def main() -> None:
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_TOKEN).concurrent_updates(False).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_error_handler(error_handler)
 
     while True:

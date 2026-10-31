@@ -6,6 +6,10 @@ import requests
 class ApiError(Exception):
     """Safe to show to the Telegram user."""
 
+    def __init__(self, message, outcome_unknown=False):
+        super().__init__(message)
+        self.outcome_unknown = outcome_unknown
+
 
 def request(method, path, **kwargs):
     base = os.environ["LINKWARDEN_API_URL"].rstrip("/")
@@ -22,7 +26,8 @@ def request(method, path, **kwargs):
             raise ValueError("Expected an object")
         return data
     except (requests.RequestException, ValueError) as error:
-        raise ApiError("Не удалось получить корректный ответ Linkwarden.") from error
+        raise ApiError("Не удалось получить корректный ответ Linkwarden.",
+                       outcome_unknown=method == "POST") from error
 
 
 def options(rows):
@@ -87,5 +92,28 @@ def save_link(url, collection_id, tags):
     })
     link = body.get("response")
     if not isinstance(link, dict) or type(link.get("id")) is not int:
-        raise ApiError("Linkwarden не вернул идентификатор ссылки.")
+        raise ApiError("Linkwarden не вернул идентификатор ссылки.", outcome_unknown=True)
     return link["id"]
+
+
+def find_link(url):
+    """Search visible links, checking exact URL matches on every result page."""
+    params = {"searchQueryString": url}
+    cursors = set()
+    while True:
+        rows = request("GET", "links", params=params).get("response")
+        if not isinstance(rows, list):
+            raise ApiError("Не удалось проверить существующие ссылки Linkwarden.")
+        if not rows:
+            return None
+        for row in rows:
+            if (not isinstance(row, dict) or type(row.get("id")) is not int
+                    or not isinstance(row.get("url"), (str, type(None)))):
+                raise ApiError("Некорректный список ссылок Linkwarden.")
+            if row.get("url") == url:
+                return row["id"]
+        cursor = rows[-1]["id"]
+        if cursor in cursors:
+            raise ApiError("Повтор страницы при проверке существующих ссылок.")
+        cursors.add(cursor)
+        params = {"searchQueryString": url, "cursor": cursor}
