@@ -70,6 +70,10 @@ Send HTTP/HTTPS links in a private chat or the configured group. The bot fetches
 
 Private messages are restricted to ALLOWED_TELEGRAM_USER_ID. Normal members of ALLOWED_TELEGRAM_GROUP_ID may submit links. Messages from bots, anonymous administrators, channel identities, and other groups are rejected. Only the original submitter can operate their session, including when another group member is the configured private-chat owner. Replies stay in the original topic using message_thread_id. Optional TELEGRAM_TOPIC_COLLECTIONS maps topic IDs to collection IDs in the configured group. For example, {"9":1} sends topic 9 to collection 1. Bound topics skip the collection picker and keep tag selection and confirmation. Back cannot change a bound collection. Missing or inaccessible bound collections produce an error with retry and cancel. Other topics and private chats retain the collection picker.
 
+Use /bind in the target topic or private chat to assign a collection interactively. Only ALLOWED_TELEGRAM_USER_ID can create or confirm bindings. Choose a collection and click Confirm binding. Cancel and Back do not modify stored settings. The selected collection is checked against the API again at confirmation.
+
+Bindings are stored in SQLite in the existing bot-state volume and take precedence over TELEGRAM_TOPIC_COLLECTIONS for the same chat and topic. They apply to newly submitted URLs. Repeating /bind changes the assignment. Each topic and private chat has an independent binding. Existing links and open URL sessions keep their previous selections.
+
 Sessions expire after one hour or a bot restart. Stale, forged, wrong-message, and wrong-topic callbacks are rejected. Telegram group privacy settings must allow the bot to receive the messages containing URLs.
 
 Collections are read from response on GET /api/v1/collections. Tags are read from data.tags on GET /api/v1/tags, following data.nextCursor with the cursor parameter. Save sends collection: {id} and tags: [{id, name}], then validates response.id. Linkwarden performs native screenshot preservation according to its archive preferences.

@@ -19,6 +19,11 @@ from linkwarden import ApiError
 from selection import SESSION_TTL
 
 
+@pytest.fixture(autouse=True)
+def isolated_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOT_STATE_PATH", str(tmp_path / "state.sqlite3"))
+
+
 @pytest.fixture
 def update():
     update = MagicMock(spec=Update)
@@ -536,3 +541,113 @@ async def test_bound_topic_still_rejects_other_member(update, context, workflow,
     await press(update, context, data=data)
     assert draft(context).stage == "tags"
     workflow[2].assert_not_called()
+
+@pytest.mark.asyncio
+async def test_bind_command_requires_confirmation_and_persists(update, context, workflow):
+    from submissions import get_binding
+    group(update, user_id=100, thread=9)
+    await bot.bind_chat(update, context)
+    assert draft(context).purpose == "bind"
+    assert update.message.reply_text.await_args.kwargs["message_thread_id"] == 9
+    await press(update, context, "pick", 2)
+    assert get_binding(-1001872870761, 9) is None
+    assert "Привязать" in update.callback_query.edit_message_text.await_args.kwargs["text"]
+    await press(update, context, "bind_save")
+    assert get_binding(-1001872870761, 9) == 2
+    # Simulate a new process context. The SQLite mapping remains.
+    context.bot_data.clear()
+    update.message.message_id = 24
+    group(update, user_id=200, thread=9)
+    await bot.handle_message(update, context)
+    assert draft(context).collection == 2 and draft(context).stage == "tags"
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bind_command_rejects_normal_member(update, context, workflow):
+    group(update, user_id=200, thread=9)
+    await bot.bind_chat(update, context)
+    workflow[0].assert_not_called()
+    assert not context.bot_data
+    assert "владелец" in update.message.reply_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_bind_cancel_and_back_do_not_write(update, context, workflow):
+    from submissions import get_binding
+    group(update, user_id=100, thread=9)
+    await bot.bind_chat(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "back")
+    assert draft(context).stage == "collections"
+    await press(update, context, "pick", 1)
+    await press(update, context, "cancel")
+    assert get_binding(-1001872870761, 9) is None
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bind_refetches_permissions_before_commit(update, context, workflow):
+    from submissions import get_binding
+    group(update, user_id=100, thread=9)
+    workflow[0].side_effect = [{2: "Fishing"}, {}]
+    await bot.bind_chat(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "bind_save")
+    assert draft(context).error and draft(context).stage == "collections"
+    assert get_binding(-1001872870761, 9) is None
+
+
+@pytest.mark.asyncio
+async def test_bind_callback_rechecks_owner(update, context, workflow, monkeypatch):
+    from submissions import get_binding
+    group(update, user_id=100, thread=9)
+    await bot.bind_chat(update, context)
+    await press(update, context, "pick", 2)
+    data = data_for(context, "bind_save")
+    # If ownership configuration changes, even the session creator loses access.
+    monkeypatch.setattr(bot, "ALLOWED_TELEGRAM_USER_ID", 999)
+    await press(update, context, data=data)
+    assert get_binding(-1001872870761, 9) is None
+    assert draft(context).stage == "confirm"
+
+
+@pytest.mark.asyncio
+async def test_private_chat_can_be_bound_by_owner(update, context, workflow):
+    from submissions import get_binding
+    await bot.bind_chat(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "bind_save")
+    assert get_binding(100, None) == 2
+    update.message.message_id = 24
+    await bot.handle_message(update, context)
+    assert draft(context).collection == 2
+
+
+@pytest.mark.asyncio
+async def test_bind_unauthorized_chat_and_api_failure(update, context, workflow):
+    group(update, user_id=100, thread=9)
+    update.effective_chat.id = -999
+    await bot.bind_chat(update, context)
+    workflow[0].assert_not_called()
+    update.effective_chat.id = -1001872870761
+    workflow[0].side_effect = [ApiError("HTTP 503"), {2: "Fishing"}]
+    await bot.bind_chat(update, context)
+    assert draft(context).error == "HTTP 503"
+    await press(update, context, "retry")
+    await press(update, context, "pick", 2)
+    assert draft(context).stage == "confirm"
+
+
+@pytest.mark.asyncio
+async def test_stored_binding_overrides_config_only_in_its_scope(update, context, workflow, monkeypatch):
+    from submissions import set_binding
+    monkeypatch.setattr(bot, "TOPIC_COLLECTIONS", {9: 1})
+    set_binding(-1001872870761, 9, 2)
+    group(update, thread=9)
+    await bot.handle_message(update, context)
+    assert draft(context).collection == 2
+    context.bot_data.clear()
+    group(update, thread=42)
+    await bot.handle_message(update, context)
+    assert draft(context).stage == "collections"

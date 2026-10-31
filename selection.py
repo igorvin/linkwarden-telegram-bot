@@ -31,6 +31,7 @@ class Draft:
     session_id: str = field(default_factory=lambda: secrets.token_urlsafe(9))
     message_id: int | None = None
     bound_collection: int | None = None
+    purpose: str = "save"
     stage: str = "collections"
     tags: dict = field(default_factory=dict)
     chosen: dict = field(default_factory=dict)
@@ -54,7 +55,17 @@ class Draft:
                 label, callback_data=f"lw:{self.session_id}:{self.revision}:{token}"
             )
 
-        text = self.url + "\n\n"
+        if self.purpose == "bind" and self.stage == "confirm":
+            name = self.collections[self.collection][:200]
+            text = f"Привязать этот чат/тему к коллекции «{name}» (#{self.collection})?"
+            rows = [
+                [button("Подтвердить привязку", "bind_save")],
+                [button("Назад", "back"), button("Отмена", "cancel")],
+            ]
+            return {"text": text, "reply_markup": InlineKeyboardMarkup(rows)}
+
+        text = ("Привязка коллекции для текущего чата/темы\n\n"
+                if self.purpose == "bind" else self.url + "\n\n")
         if self.error:
             text += self.error
             rows.append([button("Повторить загрузку", "retry")])

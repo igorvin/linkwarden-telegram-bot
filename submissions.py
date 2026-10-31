@@ -17,6 +17,12 @@ class SubmissionLedger:
             db.execute("""CREATE TABLE IF NOT EXISTS submissions (
                 fingerprint TEXT PRIMARY KEY, state TEXT NOT NULL, link_id INTEGER
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS topic_bindings (
+                chat_id INTEGER NOT NULL,
+                thread_id INTEGER NOT NULL,
+                collection_id INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, thread_id)
+            )""")
 
     @contextmanager
     def connect(self):
@@ -78,3 +84,23 @@ def save_once(url, collection_id, tags):
         raise
     ledger.finish(key, "saved", link_id)
     return link_id, True
+
+
+def get_binding(chat_id, thread_id):
+    ledger = SubmissionLedger()
+    with ledger.connect() as db:
+        row = db.execute(
+            "SELECT collection_id FROM topic_bindings WHERE chat_id=? AND thread_id=?",
+            (chat_id, thread_id or 0),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def set_binding(chat_id, thread_id, collection_id):
+    ledger = SubmissionLedger()
+    with ledger.connect() as db:
+        db.execute(
+            """INSERT INTO topic_bindings VALUES (?, ?, ?)
+            ON CONFLICT(chat_id, thread_id) DO UPDATE SET collection_id=excluded.collection_id""",
+            (chat_id, thread_id or 0, collection_id),
+        )

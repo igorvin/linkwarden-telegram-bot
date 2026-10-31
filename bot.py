@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, CallbackContext
 from telegram.error import Conflict, TelegramError, TimedOut, NetworkError
 from linkwarden import ApiError, get_collections, get_tags
-from submissions import save_once
+from submissions import save_once, get_binding, set_binding
 from selection import Draft, SESSION_TTL, parse_topic_collections
 from dataclasses import replace
 import re
@@ -232,11 +232,9 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
     thread_id = original.message_thread_id
     collections, error = await load_collections()
-    bound_collection = (
-        TOPIC_COLLECTIONS.get(thread_id)
-        if update.effective_chat.type in ("group", "supergroup")
-        and chat_id == ALLOWED_TELEGRAM_GROUP_ID else None
-    )
+    bound_collection = await asyncio.to_thread(get_binding, chat_id, thread_id)
+    if bound_collection is None and update.effective_chat.type in ("group", "supergroup"):
+        bound_collection = TOPIC_COLLECTIONS.get(thread_id)
     for link in links:
         if len(link) > 2048:
             await send_message_with_retry(update, context, "Ссылка длиннее 2048 символов.")
@@ -258,6 +256,29 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
         except TelegramError:
             del sessions[draft.session_id]
             raise
+
+
+async def bind_chat(update: Update, context: CallbackContext) -> None:
+    if not is_authorized(update):
+        return
+    if update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
+        await send_message_with_retry(update, context, "Привязку может менять только владелец бота.")
+        return
+    if not check_rate_limit(update.effective_user.id):
+        await send_message_with_retry(update, context, "Слишком много запросов. Повторите позже.")
+        return
+    original = update.effective_message
+    collections, error = await load_collections()
+    draft = Draft("", collections, update.effective_user.id, update.effective_chat.id,
+                  original.message_thread_id, original.message_id, purpose="bind", error=error)
+    sessions = active_sessions(context)
+    sessions[draft.session_id] = draft
+    try:
+        sent = await original.reply_text(**draft.view(), message_thread_id=draft.thread_id)
+        draft.message_id = sent.message_id
+    except TelegramError:
+        del sessions[draft.session_id]
+        raise
 
 
 def active_sessions(context):
@@ -315,10 +336,13 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
     parts = query.data.split(":") if isinstance(query.data, str) else []
     draft = sessions.get(parts[1]) if len(parts) == 4 and parts[0] == "lw" else None
     if draft is None:
-        await answer_callback(query, "Сессия истекла. Отправьте URL заново.")
+        await answer_callback(query, "Сессия истекла. Повторите команду или отправьте URL заново.")
         return
     if update.effective_user.id != draft.owner_id:
         await answer_callback(query, "Кнопки доступны только отправителю ссылки.")
+        return
+    if draft.purpose == "bind" and update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
+        await answer_callback(query, "Привязку может менять только владелец бота.")
         return
     message = query.message
     if (message is None or update.effective_chat.id != draft.chat_id
@@ -342,6 +366,22 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
             del sessions[draft.session_id]
             await query.edit_message_text("Отменено.")
             return
+        if operation == "bind_save":
+            collections, error = await load_collections()
+            if error or draft.collection not in collections:
+                changed = replace(draft, stage="collections", collections=collections,
+                                  actions={}, busy=False, page=0,
+                                  error=error or "Коллекция недоступна. Выберите другую после обновления.")
+                await query.edit_message_text(**changed.view())
+                sessions[draft.session_id] = changed
+                return
+            await asyncio.to_thread(set_binding, draft.chat_id, draft.thread_id, draft.collection)
+            del sessions[draft.session_id]
+            await query.edit_message_text(
+                f"Привязка сохранена: {collections[draft.collection][:200]} (#{draft.collection}). "
+                "Для новых URL останутся выбор тегов и подтверждение."
+            )
+            return
         if operation == "save":
             del sessions[draft.session_id]
             try:
@@ -361,7 +401,10 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
         if operation == "back":
             changed.page = 0
             changed.error = ""
-            if draft.stage == "confirm":
+            if draft.purpose == "bind":
+                changed.stage = "collections"
+                changed.collections, changed.error = await load_collections()
+            elif draft.stage == "confirm":
                 await load_tags(changed)
                 changed.stage = "tags"
             else:
@@ -382,7 +425,11 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
         elif operation == "pick":
             if changed.stage == "collections":
                 changed.collection = value
-                await load_tags(changed)
+                if changed.purpose == "bind":
+                    changed.stage = "confirm"
+                    changed.page = 0
+                else:
+                    await load_tags(changed)
             elif value in changed.chosen:
                 del changed.chosen[value]
             else:
@@ -474,6 +521,7 @@ def main() -> None:
     application = Application.builder().token(TELEGRAM_TOKEN).concurrent_updates(False).build()
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("bind", bind_chat))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_error_handler(error_handler)
