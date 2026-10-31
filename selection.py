@@ -55,6 +55,12 @@ class Draft:
                 label, callback_data=f"lw:{self.session_id}:{self.revision}:{token}"
             )
 
+        if self.purpose == "unbind":
+            text = (f"Удалить привязку этого чата/темы к коллекции #{self.bound_collection}?\n"
+                    "Для новых URL бот снова предложит выбрать коллекцию.")
+            rows = [[button("Удалить привязку", "unbind_save"), button("Отмена", "cancel")]]
+            return {"text": text, "reply_markup": InlineKeyboardMarkup(rows)}
+
         if self.purpose == "bind" and self.stage == "confirm":
             name = self.collections[self.collection][:200]
             text = f"Привязать этот чат/тему к коллекции «{name}» (#{self.collection})?"

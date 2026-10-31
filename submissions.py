@@ -87,6 +87,7 @@ def save_once(url, collection_id, tags):
 
 
 def get_binding(chat_id, thread_id):
+    """None means no override, zero explicitly disables a configured binding."""
     ledger = SubmissionLedger()
     with ledger.connect() as db:
         row = db.execute(

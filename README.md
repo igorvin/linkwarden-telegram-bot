@@ -72,7 +72,7 @@ Private messages are restricted to ALLOWED_TELEGRAM_USER_ID. Normal members of A
 
 Use /bind in the target topic or private chat to assign a collection interactively. Only ALLOWED_TELEGRAM_USER_ID can create or confirm bindings. Choose a collection and click Confirm binding. Cancel and Back do not modify stored settings. The selected collection is checked against the API again at confirmation.
 
-Bindings are stored in SQLite in the existing bot-state volume and take precedence over TELEGRAM_TOPIC_COLLECTIONS for the same chat and topic. They apply to newly submitted URLs. Repeating /bind changes the assignment. Each topic and private chat has an independent binding. Existing links and open URL sessions keep their previous selections.
+Bindings are stored in SQLite in the existing bot-state volume and take precedence over TELEGRAM_TOPIC_COLLECTIONS for the same chat and topic. They apply to newly submitted URLs. Repeating /bind changes the assignment. Use /unbind in that same topic or private chat to remove the assignment after confirmation. Only the owner can confirm removal. Explicit removal persists and overrides environment defaults, restoring the collection picker. Removal works even when Linkwarden is unavailable. Previously saved links and open URL sessions retain their selections. Each topic and private chat has an independent binding. Existing links and open URL sessions keep their previous selections.
 
 Sessions expire after one hour or a bot restart. Stale, forged, wrong-message, and wrong-topic callbacks are rejected. Telegram group privacy settings must allow the bot to receive the messages containing URLs.
 

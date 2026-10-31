@@ -232,9 +232,7 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
     chat_id = update.effective_chat.id
     thread_id = original.message_thread_id
     collections, error = await load_collections()
-    bound_collection = await asyncio.to_thread(get_binding, chat_id, thread_id)
-    if bound_collection is None and update.effective_chat.type in ("group", "supergroup"):
-        bound_collection = TOPIC_COLLECTIONS.get(thread_id)
+    bound_collection = await collection_for_chat(chat_id, thread_id)
     for link in links:
         if len(link) > 2048:
             await send_message_with_retry(update, context, "Ссылка длиннее 2048 символов.")
@@ -258,7 +256,23 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
             raise
 
 
+async def collection_for_chat(chat_id, thread_id):
+    binding = await asyncio.to_thread(get_binding, chat_id, thread_id)
+    if binding is None and chat_id == ALLOWED_TELEGRAM_GROUP_ID:
+        binding = TOPIC_COLLECTIONS.get(thread_id)
+    # Zero is a persisted explicit removal, overriding environment defaults.
+    return binding or None
+
+
 async def bind_chat(update: Update, context: CallbackContext) -> None:
+    await binding_command(update, context, "bind")
+
+
+async def unbind_chat(update: Update, context: CallbackContext) -> None:
+    await binding_command(update, context, "unbind")
+
+
+async def binding_command(update: Update, context: CallbackContext, purpose: str) -> None:
     if not is_authorized(update):
         return
     if update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
@@ -268,9 +282,18 @@ async def bind_chat(update: Update, context: CallbackContext) -> None:
         await send_message_with_retry(update, context, "Слишком много запросов. Повторите позже.")
         return
     original = update.effective_message
-    collections, error = await load_collections()
+    bound = None
+    collections, error = {}, ""
+    if purpose == "unbind":
+        bound = await collection_for_chat(update.effective_chat.id, original.message_thread_id)
+        if bound is None:
+            await send_message_with_retry(update, context, "Этот чат/тема уже без привязки к коллекции.")
+            return
+    else:
+        collections, error = await load_collections()
     draft = Draft("", collections, update.effective_user.id, update.effective_chat.id,
-                  original.message_thread_id, original.message_id, purpose="bind", error=error)
+                  original.message_thread_id, original.message_id, purpose=purpose, error=error,
+                  bound_collection=bound, stage="confirm" if purpose == "unbind" else "collections")
     sessions = active_sessions(context)
     sessions[draft.session_id] = draft
     try:
@@ -339,9 +362,9 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
         await answer_callback(query, "Сессия истекла. Повторите команду или отправьте URL заново.")
         return
     if update.effective_user.id != draft.owner_id:
-        await answer_callback(query, "Кнопки доступны только отправителю ссылки.")
+        await answer_callback(query, "Кнопки доступны только автору запроса.")
         return
-    if draft.purpose == "bind" and update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
+    if draft.purpose in ("bind", "unbind") and update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
         await answer_callback(query, "Привязку может менять только владелец бота.")
         return
     message = query.message
@@ -365,6 +388,18 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
         if operation == "cancel":
             del sessions[draft.session_id]
             await query.edit_message_text("Отменено.")
+            return
+        if operation == "unbind_save":
+            current = await collection_for_chat(draft.chat_id, draft.thread_id)
+            if current != draft.bound_collection:
+                del sessions[draft.session_id]
+                await query.edit_message_text("Привязка изменилась. Повторите /unbind.")
+                return
+            await asyncio.to_thread(set_binding, draft.chat_id, draft.thread_id, 0)
+            del sessions[draft.session_id]
+            await query.edit_message_text(
+                "Привязка удалена. Для новых URL снова доступен выбор коллекции."
+            )
             return
         if operation == "bind_save":
             collections, error = await load_collections()
@@ -522,6 +557,7 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("bind", bind_chat))
+    application.add_handler(CommandHandler("unbind", unbind_chat))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_error_handler(error_handler)

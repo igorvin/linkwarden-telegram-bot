@@ -651,3 +651,125 @@ async def test_stored_binding_overrides_config_only_in_its_scope(update, context
     group(update, thread=42)
     await bot.handle_message(update, context)
     assert draft(context).stage == "collections"
+
+@pytest.mark.asyncio
+async def test_unbind_restores_collection_picker_after_restart(update, context, workflow):
+    from submissions import get_binding, set_binding
+    group(update, user_id=100, thread=9)
+    set_binding(-1001872870761, 9, 2)
+    await bot.unbind_chat(update, context)
+    assert get_binding(-1001872870761, 9) == 2
+    assert draft(context).purpose == "unbind"
+    assert update.message.reply_text.await_args.kwargs["message_thread_id"] == 9
+    await press(update, context, "unbind_save")
+    assert get_binding(-1001872870761, 9) == 0
+    context.bot_data.clear()
+    group(update, user_id=200, thread=9)
+    update.message.message_id = 24
+    await bot.handle_message(update, context)
+    assert draft(context).stage == "collections" and draft(context).bound_collection is None
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unbind_cancel_preserves_assignment(update, context, workflow):
+    from submissions import get_binding, set_binding
+    group(update, user_id=100, thread=9)
+    set_binding(-1001872870761, 9, 2)
+    await bot.unbind_chat(update, context)
+    await press(update, context, "cancel")
+    assert get_binding(-1001872870761, 9) == 2
+
+
+@pytest.mark.asyncio
+async def test_unbind_overrides_environment_binding(update, context, workflow, monkeypatch):
+    from submissions import get_binding
+    monkeypatch.setattr(bot, "TOPIC_COLLECTIONS", {9: 2})
+    group(update, user_id=100, thread=9)
+    await bot.unbind_chat(update, context)
+    await press(update, context, "unbind_save")
+    assert get_binding(-1001872870761, 9) == 0
+    assert await bot.collection_for_chat(-1001872870761, 9) is None
+    assert await bot.collection_for_chat(-1001872870761, 42) is None
+
+
+@pytest.mark.asyncio
+async def test_unbind_requires_owner_for_command_and_callback(update, context, workflow):
+    from submissions import get_binding, set_binding
+    group(update, thread=9)
+    set_binding(-1001872870761, 9, 2)
+    await bot.unbind_chat(update, context)
+    assert not context.bot_data
+    group(update, user_id=100, thread=9)
+    await bot.unbind_chat(update, context)
+    data = data_for(context, "unbind_save")
+    update.effective_user.id = 200
+    await press(update, context, data=data)
+    assert get_binding(-1001872870761, 9) == 2
+
+
+@pytest.mark.asyncio
+async def test_unbind_is_independent_of_linkwarden_api(update, context, workflow):
+    from submissions import set_binding
+    group(update, user_id=100, thread=9)
+    set_binding(-1001872870761, 9, 2)
+    workflow[0].side_effect = ApiError("HTTP 503")
+    await bot.unbind_chat(update, context)
+    await press(update, context, "unbind_save")
+    workflow[0].assert_not_called()
+    workflow[1].assert_not_called()
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unbind_repeated_confirmation_and_changed_assignment(update, context, workflow):
+    from submissions import get_binding, set_binding
+    group(update, user_id=100, thread=9)
+    set_binding(-1001872870761, 9, 2)
+    await bot.unbind_chat(update, context)
+    data = data_for(context, "unbind_save")
+    set_binding(-1001872870761, 9, 1)
+    await press(update, context, data=data)
+    assert get_binding(-1001872870761, 9) == 1
+    assert "изменилась" in update.callback_query.edit_message_text.await_args.args[0]
+    await bot.unbind_chat(update, context)
+    data = data_for(context, "unbind_save")
+    await asyncio.gather(press(update, context, data=data), press(update, context, data=data))
+    assert get_binding(-1001872870761, 9) == 0
+
+
+@pytest.mark.asyncio
+async def test_unbind_only_current_scope_and_rebind(update, context, workflow):
+    from submissions import get_binding, set_binding
+    set_binding(-1001872870761, 9, 2)
+    set_binding(-1001872870761, 42, 1)
+    set_binding(100, None, 2)
+    await bot.unbind_chat(update, context)
+    await press(update, context, "unbind_save")
+    assert get_binding(100, None) == 0
+    assert get_binding(-1001872870761, 9) == 2
+    assert get_binding(-1001872870761, 42) == 1
+    await bot.bind_chat(update, context)
+    await press(update, context, "pick", 1)
+    await press(update, context, "bind_save")
+    assert get_binding(100, None) == 1
+
+
+@pytest.mark.asyncio
+async def test_unbind_expired_confirmation_does_not_write(update, context, workflow):
+    from submissions import get_binding, set_binding
+    group(update, user_id=100, thread=9)
+    set_binding(-1001872870761, 9, 2)
+    await bot.unbind_chat(update, context)
+    data = data_for(context, "unbind_save")
+    draft(context).created -= SESSION_TTL + 1
+    await press(update, context, data=data)
+    assert get_binding(-1001872870761, 9) == 2
+
+
+@pytest.mark.asyncio
+async def test_unbind_already_unbound(update, context, workflow):
+    await bot.unbind_chat(update, context)
+    assert "без привязки" in update.message.reply_text.await_args.args[0]
+    assert not context.bot_data
+    workflow[0].assert_not_called()
