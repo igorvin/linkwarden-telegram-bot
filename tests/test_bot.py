@@ -1,18 +1,20 @@
 import os
 import pytest
+from linkwarden import ApiError
 from unittest.mock import patch, MagicMock, AsyncMock
-from datetime import datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 # Set required environment variables before importing bot
 os.environ.setdefault('TELEGRAM_TOKEN', 'test-token')
 os.environ.setdefault('LINKWARDEN_API_URL', 'https://linkwarden.example.com')
 os.environ.setdefault('LINKWARDEN_API_KEY', 'test-api-key')
-os.environ.setdefault('LINKWARDEN_COLLECTION_ID', '1')
+os.environ['ALLOWED_TELEGRAM_USER_ID'] = '100'
 
 from bot import (
     extract_links,
-    add_to_linkwarden,
     handle_message,
+    handle_callback,
     start,
     send_message_with_retry,
     error_handler,
@@ -25,6 +27,7 @@ from bot import (
 @pytest.fixture
 def mock_update():
     mock = MagicMock()
+    mock.effective_chat.type = "private"
     mock.effective_chat.id = 12345
     mock.effective_user.id = 100
     mock.message.text = "Check out this link: https://example.com"
@@ -34,6 +37,7 @@ def mock_update():
 @pytest.fixture
 def mock_context():
     context = MagicMock()
+    context.user_data = {}
     context.bot.send_message = AsyncMock()
     return context
 
@@ -78,86 +82,6 @@ class TestExtractLinks:
         assert links == []
 
 
-class TestAddToLinkwarden:
-    @patch('bot.http.post')
-    def test_success(self, mock_post):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {'id': 1, 'url': 'https://example.com'}
-        mock_post.return_value = mock_resp
-
-        result = add_to_linkwarden("https://example.com")
-        assert result is True
-
-    @patch('bot.http.post')
-    def test_failure_500(self, mock_post):
-        import requests as req
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
-        mock_resp.raise_for_status.side_effect = req.exceptions.HTTPError(response=mock_resp)
-        mock_post.return_value = mock_resp
-
-        result = add_to_linkwarden("https://example.com")
-        assert result is False
-
-    @patch('bot.http.post')
-    def test_failure_connection_error(self, mock_post):
-        import requests as req
-        mock_post.side_effect = req.exceptions.ConnectionError()
-
-        result = add_to_linkwarden("https://example.com")
-        assert result is False
-
-    @patch('bot.http.post')
-    def test_failure_ssl_error(self, mock_post):
-        import requests as req
-        mock_post.side_effect = req.exceptions.SSLError()
-
-        result = add_to_linkwarden("https://example.com")
-        assert result is False
-
-    @patch('bot.time.sleep', return_value=None)
-    @patch('bot.http.post')
-    def test_retry_on_timeout(self, mock_post, mock_sleep):
-        import requests as req
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {'id': 1}
-        mock_post.side_effect = [
-            req.exceptions.Timeout(),
-            req.exceptions.Timeout(),
-            mock_resp,
-        ]
-
-        result = add_to_linkwarden("https://example.com")
-        assert result is True
-        assert mock_post.call_count == 3
-
-    @patch('bot.http.post')
-    def test_response_without_id(self, mock_post):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {'url': 'https://example.com'}
-        mock_post.return_value = mock_resp
-
-        result = add_to_linkwarden("https://example.com")
-        assert result is False
-
-    @patch('bot.http.post')
-    def test_auth_failure(self, mock_post):
-        import requests as req
-        mock_resp = MagicMock()
-        mock_resp.status_code = 401
-        mock_resp.raise_for_status.side_effect = req.exceptions.HTTPError(response=mock_resp)
-        mock_post.return_value = mock_resp
-
-        result = add_to_linkwarden("https://example.com")
-        assert result is False
-
-
 class TestRateLimit:
     def setup_method(self):
         user_message_history.clear()
@@ -178,14 +102,12 @@ class TestRateLimit:
 
 class TestHandleMessage:
     @pytest.mark.asyncio
-    @patch('bot.add_to_linkwarden', return_value=True)
-    @patch('bot.send_message_with_retry', new_callable=AsyncMock)
+    @patch('bot.get_collections', return_value={1: "Inbox"})
     @patch('bot.check_rate_limit', return_value=True)
-    async def test_successful_links(self, mock_rate, mock_send, mock_add, mock_update, mock_context):
+    async def test_offers_collection(self, mock_rate, mock_get, mock_update, mock_context):
         await handle_message(mock_update, mock_context)
-        mock_send.assert_called_once()
-        call_text = mock_send.call_args[0][2]
-        assert "1 link(s)" in call_text
+        keyboard = mock_context.bot.send_message.await_args.kwargs["reply_markup"]
+        assert keyboard.inline_keyboard[0][0].text == "Inbox"
 
     @pytest.mark.asyncio
     @patch('bot.send_message_with_retry', new_callable=AsyncMock)
@@ -276,3 +198,140 @@ class TestStart:
         mock_context.bot.send_message.assert_called_once()
         text = mock_context.bot.send_message.call_args[1]['text']
         assert "Linkwarden" in text
+
+
+class TestSelection:
+    @pytest.fixture
+    def workflow(self, mock_update, mock_context):
+        query = mock_update.callback_query
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        query.message.message_id = 55
+        mock_context.bot.send_message.return_value.message_id = 55
+        with (patch("bot.check_rate_limit", return_value=True),
+              patch("bot.get_collections", return_value={1: "A", 2: "B"}) as collections,
+              patch("bot.get_tags", return_value={3: "C", 4: "D"}) as tags,
+              patch("bot.save_link", return_value=91) as save):
+            async def press(action, data=None):
+                draft = mock_context.user_data["drafts"].get(query.message.message_id)
+                query.data = data or f"lw:{draft.revision}:{action}"
+                await handle_callback(mock_update, mock_context)
+
+            yield SimpleNamespace(update=mock_update, context=mock_context, query=query,
+                                  collections=collections, tags=tags, save=save, press=press)
+
+    @pytest.mark.asyncio
+    async def test_full_flow(self, workflow):
+        w = workflow
+        await handle_message(w.update, w.context)
+        initial = w.context.user_data["drafts"][55].revision
+        await w.press("pick:2")
+        await w.press("pick:3")
+        await w.press("pick:4")
+        await w.press("pick:3")
+        await w.press("done")
+        summary = w.query.edit_message_text.await_args.kwargs["text"]
+        assert "https://example.com" in summary and "B (#2)" in summary and "• D" in summary
+        assert "• C" not in summary
+        await w.press("save", f"lw:{initial}:save")
+        w.save.assert_not_called()
+        await w.press("save")
+        w.save.assert_called_once_with("https://example.com", 2, {4: "D"})
+        await w.press("save", w.query.data)
+        w.save.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("user_id,chat_type", [(999, "private"), (100, "group")])
+    @pytest.mark.parametrize("action", ["pick:1", "retry", "save", "cancel"])
+    async def test_unauthorized_button(self, workflow, user_id, chat_type, action):
+        w = workflow
+        await handle_message(w.update, w.context)
+        draft = w.context.user_data["drafts"][55]
+        if action == "save":
+            await w.press("pick:1")
+            await w.press("done")
+        elif action == "retry":
+            draft.error = "Error"
+            draft.view()
+        draft = w.context.user_data["drafts"][55]
+        revision, actions = draft.revision, draft.actions.copy()
+        w.collections.reset_mock()
+        w.tags.reset_mock()
+        w.query.edit_message_text.reset_mock()
+        w.update.effective_user.id = user_id
+        w.update.effective_chat.type = chat_type
+        await w.press(action)
+        assert w.context.user_data["drafts"][55] is draft
+        assert draft.revision == revision and draft.actions == actions
+        w.collections.assert_not_called()
+        w.tags.assert_not_called()
+        w.save.assert_not_called()
+        w.query.edit_message_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_and_failed_fetch(self, workflow):
+        w = workflow
+        w.collections.side_effect = [ApiError("HTTP 503"), {}, {1: "A"}]
+        w.tags.side_effect = [ApiError("HTTP 503"), {}]
+        await handle_message(w.update, w.context)
+        await w.press("retry")
+        assert "Нет доступных" in w.query.edit_message_text.await_args.kwargs["text"]
+        await w.press("retry")
+        await w.press("pick:1")
+        await w.press("retry")
+        assert "Без тегов" in w.query.edit_message_text.await_args.kwargs["text"]
+        await w.press("cancel")
+        w.save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_each_url_has_independent_buttons(self, workflow):
+        w = workflow
+        w.update.message.text = "https://a.com https://b.com"
+        w.context.bot.send_message.side_effect = [Mock(message_id=55), Mock(message_id=56)]
+        await handle_message(w.update, w.context)
+        a, b = w.context.user_data["drafts"].values()
+        assert a.url != b.url
+        await w.press("pick:2", f"lw:{b.revision}:pick:2")
+        w.tags.assert_not_called()
+        await w.press("pick:2")
+        assert w.context.user_data["drafts"][55].collection == 2 and b.collection is None
+
+    @pytest.mark.asyncio
+    async def test_paging_and_unknown_save(self, workflow):
+        w = workflow
+        w.tags.return_value = {i: f"tag{i}" for i in range(1, 11)}
+        w.save.side_effect = ApiError("Нет ответа")
+        await handle_message(w.update, w.context)
+        await w.press("pick:1")
+        await w.press("next")
+        await w.press("pick:10")
+        await w.press("prev")
+        await w.press("done")
+        await w.press("save")
+        assert "проверьте коллекцию" in w.query.edit_message_text.await_args.args[0]
+        await w.press("save", w.query.data)
+        w.save.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_two_simultaneous_confirmations(self, workflow):
+        import asyncio
+        w = workflow
+        w.tags.return_value = {}
+        await handle_message(w.update, w.context)
+        await w.press("pick:1")
+        data = "lw:" + w.context.user_data["drafts"][55].revision + ":save"
+        await asyncio.gather(w.press("save", data), w.press("save", data))
+        w.save.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_rejected_keyboard_edit_can_be_retried(self, workflow):
+        from telegram.error import NetworkError
+        w = workflow
+        await handle_message(w.update, w.context)
+        w.query.edit_message_text.side_effect = NetworkError("test")
+        with pytest.raises(NetworkError):
+            await w.press("pick:1")
+        original_data = w.query.data
+        w.query.edit_message_text.side_effect = None
+        await w.press("pick:1", original_data)
+        assert w.context.user_data["drafts"][55].stage == "tags"

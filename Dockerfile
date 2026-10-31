@@ -8,7 +8,7 @@ RUN addgroup -g 1001 -S appgroup && \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py .
+COPY bot.py linkwarden.py selection.py ./
 RUN chown -R appuser:appgroup /app
 
 USER appuser

@@ -16,7 +16,7 @@ A Telegram bot that integrates with Linkwarden to save bookmarks directly from T
 #### 1. Clone the repository
 
 ```bash
-git clone https://github.com/orguetta/linkwarden-telegram-bot.git
+git clone https://github.com/igorvin/linkwarden-telegram-bot.git
 cd linkwarden-telegram-bot
 ```
 
@@ -32,13 +32,13 @@ cp example.env .env
 TELEGRAM_TOKEN=your_bot_token
 LINKWARDEN_API_URL=https://your-linkwarden-instance.com
 LINKWARDEN_API_KEY=your_api_key
-LINKWARDEN_COLLECTION_ID=your_collection_id
+ALLOWED_TELEGRAM_USER_ID=your_telegram_user_id
 ```
 
 #### 4. Build and run with Docker Compose
 
 ```bash
-docker-compose up -d
+docker compose up --build -d
 ```
 
 ### Manual Installation
@@ -53,7 +53,7 @@ pip install -r requirements.txt
 export TELEGRAM_TOKEN=your_bot_token
 export LINKWARDEN_API_URL=https://your-linkwarden-instance.com
 export LINKWARDEN_API_KEY=your_api_key
-export LINKWARDEN_COLLECTION_ID=your_collection_id
+export ALLOWED_TELEGRAM_USER_ID=your_telegram_user_id
 ```
 
 ### Run the bot
@@ -66,21 +66,7 @@ python bot.py
 
 ### Adding Links
 
-Send a message containing links to the bot. The bot will automatically extract HTTP/HTTPS URLs and add them to your specified Linkwarden collection.
-
-### Example
-
-1. Send a message to the bot:
-
-```
-Check out this cool website: https://example.com
-```
-
-2. The bot will respond:
-
-```
-Added 1 link(s) to Linkwarden
-```
+Send HTTP/HTTPS links in your private chat with the bot. Each link gets its own collection picker. Select any existing tags, review the selection, and confirm to save. Drafts expire after one hour or a bot restart. Linkwarden handles screenshots according to its archive settings.
 
 ## Configuration
 
@@ -89,7 +75,7 @@ Added 1 link(s) to Linkwarden
 | `TELEGRAM_TOKEN` | Yes | - | Telegram bot token from BotFather |
 | `LINKWARDEN_API_URL` | Yes | - | Linkwarden server URL |
 | `LINKWARDEN_API_KEY` | Yes | - | Linkwarden API key |
-| `LINKWARDEN_COLLECTION_ID` | Yes | - | Target collection ID |
+| `ALLOWED_TELEGRAM_USER_ID` | Yes | - | Numeric Telegram user ID allowed in private chat |
 | `LOG_LEVEL` | No | `WARNING` | Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
 | `RATE_LIMIT_THRESHOLD` | No | `10` | Max messages per user per window |
 | `RATE_LIMIT_WINDOW` | No | `60` | Rate limit window in seconds |
@@ -99,5 +85,5 @@ Added 1 link(s) to Linkwarden
 
 ## Badges
 
-![Build Status](https://img.shields.io/github/actions/workflow/status/orguetta/linkwarden-telegram-bot/docker-publish.yml?branch=main)
-![License](https://img.shields.io/github/license/orguetta/linkwarden-telegram-bot)
+![Build Status](https://img.shields.io/github/actions/workflow/status/igorvin/linkwarden-telegram-bot/docker-publish.yml?branch=main)
+![License](https://img.shields.io/github/license/igorvin/linkwarden-telegram-bot)

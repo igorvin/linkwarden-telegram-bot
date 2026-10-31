@@ -6,14 +6,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/orguetta/linkwarden-telegram-bot:latest
+    image: linkwarden-telegram-bot:local
     networks:
       - internal
     environment:
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
       - LINKWARDEN_API_URL=${LINKWARDEN_API_URL}
       - LINKWARDEN_API_KEY=${LINKWARDEN_API_KEY}
-      - LINKWARDEN_COLLECTION_ID=${LINKWARDEN_COLLECTION_ID}
       - ALLOWED_TELEGRAM_USER_ID=${ALLOWED_TELEGRAM_USER_ID}
     command: ["python", "bot.py"]
     restart: unless-stopped
