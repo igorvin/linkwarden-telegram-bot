@@ -54,6 +54,12 @@ def context():
     return context
 
 
+@pytest.fixture(autouse=True)
+def metadata_transport():
+    with patch("bot.get_link_metadata", side_effect=ApiError("metadata unavailable")):
+        yield
+
+
 @pytest.fixture
 def workflow():
     with (patch("bot.get_collections", return_value={1: "Inbox", 2: "Fishing"}) as collections,
@@ -293,7 +299,7 @@ async def test_api_failures_and_empty_collections(update, context, workflow):
     assert draft(context).stage == "confirm"
     workflow[2].side_effect = ApiError("Неизвестный результат", outcome_unknown=True)
     await press(update, context, "save")
-    assert "неизвестен" in update.callback_query.edit_message_text.await_args.args[0]
+    assert "неизвестен" in update.callback_query.edit_message_text.await_args.kwargs["text"]
 
 
 @pytest.mark.asyncio
@@ -415,7 +421,7 @@ async def test_group_flow_uses_real_api_client_and_persistent_dedup(update, cont
         await press(update, context, "done")
         await press(update, context, "save")
         assert request.call_count == 2
-        assert "уже есть" in update.callback_query.edit_message_text.await_args.args[0]
+        assert "уже есть" in update.callback_query.edit_message_text.await_args.kwargs["text"]
 
 
 @pytest.mark.asyncio
@@ -1019,3 +1025,79 @@ async def test_missing_default_tag_is_not_reintroduced(update, context, workflow
     await bot.handle_message(update, context)
     await press(update, context, "pick", 1)
     assert draft(context).chosen == {3: "Knots"}
+
+@pytest.mark.asyncio
+async def test_saved_message_has_open_button_and_actual_metadata(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "pick", 3)
+    await press(update, context, "done")
+    with patch("bot.get_link_metadata", return_value=("Actual collection", ("Actual tag",))):
+        await press(update, context, "save")
+    reply = update.callback_query.edit_message_text.await_args.kwargs
+    assert "Actual collection" in reply["text"] and "Actual tag" in reply["text"]
+    button = reply["reply_markup"].inline_keyboard[0][0]
+    assert button.text == "Открыть в Linkwarden"
+    assert button.url == "https://linkwarden.example.com/links/91"
+    assert button.callback_data is None
+
+
+@pytest.mark.asyncio
+async def test_duplicate_result_does_not_claim_requested_metadata(update, context, workflow):
+    workflow[2].return_value = (91, False)
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "pick", 3)
+    await press(update, context, "done")
+    with patch("bot.get_link_metadata", return_value=("Original", ("Old tag",))):
+        await press(update, context, "save")
+    reply = update.callback_query.edit_message_text.await_args.kwargs
+    assert "уже есть" in reply["text"] and "Original" in reply["text"]
+    assert "Fishing" not in reply["text"] and "Knots" not in reply["text"]
+
+
+@pytest.mark.asyncio
+async def test_metadata_failure_after_post_preserves_success(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "pick", 3)
+    await press(update, context, "done")
+    await press(update, context, "save")
+    reply = update.callback_query.edit_message_text.await_args.kwargs
+    assert "сохранена" in reply["text"] and "Fishing" in reply["text"] and "Knots" in reply["text"]
+    assert "reply_markup" in reply
+    workflow[2].assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_metadata_failure_does_not_show_proposed_selection(update, context, workflow):
+    workflow[2].return_value = (91, False)
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "done")
+    await press(update, context, "save")
+    text = update.callback_query.edit_message_text.await_args.kwargs["text"]
+    assert "временно недоступны" in text and "Fishing" not in text
+
+
+@pytest.mark.asyncio
+async def test_failed_save_never_shows_success_button(update, context, workflow):
+    workflow[2].side_effect = ApiError("Timeout", outcome_unknown=True)
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "done")
+    await press(update, context, "save")
+    reply = update.callback_query.edit_message_text.await_args.kwargs
+    assert "неизвестен" in reply["text"] and "reply_markup" not in reply
+
+
+@pytest.mark.asyncio
+async def test_invalid_public_url_keeps_success_without_exposing_secret(update, context, workflow, monkeypatch):
+    monkeypatch.setenv("LINKWARDEN_PUBLIC_URL", "https://user:secret@example.com")
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "done")
+    await press(update, context, "save")
+    reply = update.callback_query.edit_message_text.await_args.kwargs
+    assert "сохранена" in reply["text"] and "reply_markup" not in reply
+    assert "secret" not in str(reply)

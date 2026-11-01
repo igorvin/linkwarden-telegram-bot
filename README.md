@@ -94,6 +94,10 @@ Sessions expire after one hour or a bot restart. Stale, forged, wrong-message, a
 
 Collections are read from response on GET /api/v1/collections. Tags are read from data.tags on GET /api/v1/tags, following data.nextCursor with the cursor parameter. Save sends collection: {id} and tags: [{id, name}], then validates response.id. Linkwarden performs native screenshot preservation according to its archive preferences.
 
+After an individual Save, the result includes the current collection, tags, and an Open in Linkwarden button pointing to /links/ID. Existing duplicate links display their own metadata. If metadata cannot be read after a successful creation, the confirmed selection is shown and the save remains successful. Failed or uncertain saves do not show a success button.
+
+LINKWARDEN_PUBLIC_URL optionally sets a browser-facing base address. It defaults to LINKWARDEN_API_URL. Use the address reachable from the user's browser when the API address is internal to Docker. URL credentials, query parameters, fragments, and invalid addresses are rejected for buttons. The API token is never included in the button, and the Linkwarden web login still controls access.
+
 The bot searches existing visible links using GET /api/v1/links with searchQueryString and cursor, and compares exact URL strings. If the URL exists, it reports the existing link without moving or retagging it. A SQLite journal in the bot-state Docker volume atomically claims each URL for the configured API account. Repeated confirmations, repeated messages, concurrent submissions, and container restarts reuse the recorded result. Keep this volume when replacing the container.
 
 A timeout, server error, or malformed response after POST has an unknown outcome. The bot retains that claim and checks Linkwarden before another attempt. If the link cannot be found, it blocks another POST and asks for manual verification. GET failures and definite 4xx rejections allow a later attempt. The journal deduplicates exact URL strings. Redirect aliases and simultaneous writes from clients outside this bot require Linkwarden's own duplicate prevention. Native API duplicate checking is not an atomic idempotency mechanism.
@@ -111,6 +115,7 @@ python -m pytest -q -o asyncio_default_fixture_loop_scope=function
 |---|---|---|---|
 | `TELEGRAM_TOKEN` | Yes | - | Telegram bot token from BotFather |
 | `LINKWARDEN_API_URL` | Yes | - | Linkwarden server URL |
+| `LINKWARDEN_PUBLIC_URL` | No | API base URL | Browser-facing Linkwarden address for open buttons |
 | `LINKWARDEN_API_KEY` | Yes | - | Linkwarden API key |
 | `ALLOWED_TELEGRAM_USER_ID` | Yes | - | Numeric Telegram user ID allowed in private chat |
 | `ALLOWED_TELEGRAM_GROUP_ID` | No | `0` | Authorized group ID, 0 disables groups |

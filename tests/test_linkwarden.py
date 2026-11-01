@@ -133,3 +133,60 @@ def test_get_error_does_not_claim_unknown_save(transport):
     with pytest.raises(ApiError) as caught:
         get_tags()
     assert not caught.value.outcome_unknown
+
+@pytest.mark.parametrize("public,api,expected", [
+    ("", "https://lw.example.com", "https://lw.example.com/links/12"),
+    ("https://public.example.com/", "http://linkwarden:3000", "https://public.example.com/links/12"),
+    ("https://example.com/lw/", "https://api.example.com", "https://example.com/lw/links/12"),
+    ("http://192.168.1.140:3000", "http://internal", "http://192.168.1.140:3000/links/12"),
+])
+def test_public_link_url(public, api, expected, monkeypatch):
+    from linkwarden import public_link_url
+    monkeypatch.setenv("LINKWARDEN_API_URL", api)
+    monkeypatch.setenv("LINKWARDEN_PUBLIC_URL", public)
+    assert public_link_url(12) == expected
+
+
+@pytest.mark.parametrize("base", [
+    "https://user:secret@example.com", "https://example.com?token=secret",
+    "https://example.com/#secret", "javascript:alert(1)",
+    "http://example.com:99999", "http://example.com:abc", "/relative",
+    "https://example.com\n", "http://[invalid", "https://",
+])
+def test_unsafe_public_urls_do_not_leak_into_buttons(base, monkeypatch):
+    from linkwarden import public_link_url
+    monkeypatch.setenv("LINKWARDEN_PUBLIC_URL", base)
+    assert public_link_url(12) is None
+
+
+@pytest.mark.parametrize("link_id", [True, 0, -1, "12"])
+def test_public_url_requires_link_id(link_id):
+    from linkwarden import public_link_url
+    assert public_link_url(link_id) is None
+
+
+def test_actual_link_metadata(transport):
+    from linkwarden import get_link_metadata
+    transport.return_value = response({"response": {
+        "id": 12, "collection": {"name": "Actual collection"},
+        "tags": [{"id": 1, "name": "Actual tag"}],
+    }})
+    assert get_link_metadata(12) == ("Actual collection", ("Actual tag",))
+    assert transport.call_args.args[:2] == ("GET", "https://linkwarden.example.com/api/v1/links/12")
+
+
+@pytest.mark.parametrize("link", [
+    {"id": 99, "collection": {"name": "A"}, "tags": []},
+    {"id": 12, "collection": None, "tags": []},
+    {"id": 12, "collection": {"name": "A"}, "tags": "bad"},
+])
+def test_bad_link_metadata(transport, link):
+    from linkwarden import get_link_metadata
+    transport.return_value = response({"response": link})
+    with pytest.raises(ApiError):
+        get_link_metadata(12)
+
+def test_public_url_rejects_embedded_whitespace(monkeypatch):
+    from linkwarden import public_link_url
+    monkeypatch.setenv("LINKWARDEN_PUBLIC_URL", "https://ex ample.com")
+    assert public_link_url(12) is None

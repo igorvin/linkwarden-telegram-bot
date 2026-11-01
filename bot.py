@@ -3,10 +3,10 @@ import logging
 import time
 import asyncio
 import sys
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, CallbackContext
 from telegram.error import Conflict, TelegramError, TimedOut, NetworkError
-from linkwarden import ApiError, get_collections, get_tags
+from linkwarden import ApiError, get_collections, get_tags, get_link_metadata, public_link_url
 from submissions import save_once, get_binding, set_binding, get_default_tags, set_default_tags
 from scan_export import ExportError, MAX_EXPORT_BYTES, parse_export
 from scan_jobs import ScanStore, progress_text
@@ -542,6 +542,33 @@ async def run_scan(job_id, context):
         context.bot_data.get("scan_tasks", {}).pop(job_id, None)
 
 
+
+async def saved_link_reply(link_id, created, draft):
+    text = (f"Ссылка сохранена в Linkwarden (#{link_id})." if created else
+            f"Ссылка уже есть в Linkwarden (#{link_id}).")
+    try:
+        collection, tags = await asyncio.to_thread(get_link_metadata, link_id)
+    except ApiError:
+        if created:
+            collection = draft.collections.get(draft.collection, f"#{draft.collection}")
+            tags = tuple(draft.chosen.values())
+        else:
+            collection, tags = None, ()
+            text += "\nСведения о коллекции и тегах временно недоступны."
+    if collection is not None:
+        text += "\nКоллекция: " + collection[:200]
+        text += "\nТеги: " + (", ".join(name[:75] for name in tags[:20]) or "Нет")
+        if len(tags) > 20:
+            text += f" и ещё {len(tags) - 20}"
+    reply = {"text": text, "disable_web_page_preview": True}
+    url = public_link_url(link_id)
+    if url:
+        reply["reply_markup"] = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Открыть в Linkwarden", url=url)]
+        ])
+    return reply
+
+
 async def answer_callback(query, text=None):
     try:
         await query.answer(text)
@@ -689,13 +716,13 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
                 link_id, created = await asyncio.to_thread(
                     save_once, draft.url, draft.collection, draft.chosen
                 )
-                text = (f"Ссылка сохранена в Linkwarden (#{link_id})." if created else
-                        f"Ссылка уже есть в Linkwarden (#{link_id}). Новая копия не создана.")
+                reply = await saved_link_reply(link_id, created, draft)
             except ApiError as error:
                 text = str(error)
                 if error.outcome_unknown:
                     text += " Результат сохранения неизвестен. Проверьте Linkwarden."
-            await query.edit_message_text(text)
+                reply = {"text": text}
+            await query.edit_message_text(**reply)
             return
 
         changed = replace(draft, chosen=draft.chosen.copy(), actions={}, busy=False)

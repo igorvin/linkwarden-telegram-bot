@@ -1,4 +1,5 @@
 import os
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -117,3 +118,37 @@ def find_link(url):
             raise ApiError("Повтор страницы при проверке существующих ссылок.")
         cursors.add(cursor)
         params = {"searchQueryString": url, "cursor": cursor}
+
+
+def public_link_url(link_id):
+    """Build an authenticated UI route, never an API or token-bearing URL."""
+    if type(link_id) is not int or link_id <= 0:
+        return None
+    base = os.environ.get("LINKWARDEN_PUBLIC_URL") or os.environ["LINKWARDEN_API_URL"]
+    if any(ord(character) < 32 for character in base) or any(character.isspace() for character in base.strip()):
+        return None
+    try:
+        parsed = urlsplit(base.strip())
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment):
+            return None
+        # Accessing port validates malformed and out-of-range ports.
+        if parsed.port is not None and parsed.port <= 0:
+            return None
+    except ValueError:
+        return None
+    return urlunsplit((parsed.scheme, parsed.netloc,
+                       parsed.path.rstrip("/") + f"/links/{link_id}", "", ""))
+
+
+def get_link_metadata(link_id):
+    link = request("GET", f"links/{link_id}").get("response")
+    if not isinstance(link, dict) or type(link.get("id")) is not int or link["id"] != link_id:
+        raise ApiError("Не удалось прочитать сведения о сохранённой ссылке.")
+    collection = link.get("collection")
+    if (not isinstance(collection, dict) or not isinstance(collection.get("name"), str)
+            or not collection["name"]):
+        raise ApiError("Не удалось прочитать коллекцию ссылки.")
+    tags = options(link.get("tags"))
+    return collection["name"], tuple(tags.values())
