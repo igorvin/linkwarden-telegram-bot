@@ -74,6 +74,16 @@ Use /bind in the target topic or private chat to assign a collection interactive
 
 Bindings are stored in SQLite in the existing bot-state volume and take precedence over TELEGRAM_TOPIC_COLLECTIONS for the same chat and topic. They apply to newly submitted URLs. Repeating /bind changes the assignment. Use /unbind in that same topic or private chat to remove the assignment after confirmation. Only the owner can confirm removal. Explicit removal persists and overrides environment defaults, restoring the collection picker. Removal works even when Linkwarden is unavailable. Previously saved links and open URL sessions retain their selections. Each topic and private chat has an independent binding. Existing links and open URL sessions keep their previous selections.
 
+Use /scan in a configured group topic to import old links from a Telegram Desktop JSON export. Only the bot owner can initiate, upload, confirm, resume, or cancel an import. Send /scan, then upload result.json as a document in the same topic. Exports are limited to 10 MiB, 100000 messages, and 10000 unique eligible URLs.
+
+The parser checks the exported chat ID, resolves topic membership from topic-created messages, explicit message_thread_id values, and reply_to_message_id chains, and extracts plain and hidden HTTP/HTTPS links through the existing URL validator. It skips the bot's own exported messages, other topics, and messages without a provable topic. The preview lists included and skipped counts. General and private-chat imports are currently unsupported.
+
+The collection and tag menus use the current topic binding when present. Only clicking Start import creates a durable job and starts saving. All imported URLs use save_once, including duplicate checks and uncertain-outcome handling. Already existing links keep their metadata.
+
+Jobs persist their URL list, chosen metadata, counts, and cursor in the existing SQLite volume. The original export file is processed in memory. The worker processes one URL at a time, pauses on the first API error, and leaves remaining URLs unprocessed. Use /scan to resume or cancel a pending job, including after a restart. A confirmed job may continue in the background while normal bot messages are processed. Only one active job per topic is allowed.
+
+Cancel stops subsequent requests. A request already sent may complete, and saved links remain. Imports do not resume automatically after restart. To retry a cancelled batch, upload the export again and confirm a new job, existing links will be skipped. Avoid removing the state volume.
+
 Sessions expire after one hour or a bot restart. Stale, forged, wrong-message, and wrong-topic callbacks are rejected. Telegram group privacy settings must allow the bot to receive the messages containing URLs.
 
 Collections are read from response on GET /api/v1/collections. Tags are read from data.tags on GET /api/v1/tags, following data.nextCursor with the cursor parameter. Save sends collection: {id} and tags: [{id, name}], then validates response.id. Linkwarden performs native screenshot preservation according to its archive preferences.
@@ -85,7 +95,7 @@ A timeout, server error, or malformed response after POST has an unknown outcome
 Run tests independently of the live bot:
 
 ```bash
-python -m compileall -q bot.py linkwarden.py selection.py submissions.py
+python -m compileall -q bot.py linkwarden.py selection.py submissions.py scan_export.py scan_jobs.py
 python -m pytest -q -o asyncio_default_fixture_loop_scope=function
 ```
 

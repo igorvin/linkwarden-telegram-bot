@@ -8,6 +8,8 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 from telegram.error import Conflict, TelegramError, TimedOut, NetworkError
 from linkwarden import ApiError, get_collections, get_tags
 from submissions import save_once, get_binding, set_binding
+from scan_export import ExportError, MAX_EXPORT_BYTES, parse_export
+from scan_jobs import ScanStore, progress_text
 from selection import Draft, SESSION_TTL, parse_topic_collections
 from dataclasses import replace
 import re
@@ -342,6 +344,151 @@ async def load_tags(draft):
         draft.error = str(error)
 
 
+
+async def send_draft(update, context, draft):
+    sessions = active_sessions(context)
+    sessions[draft.session_id] = draft
+    try:
+        sent = await update.effective_message.reply_text(
+            **draft.view(), message_thread_id=draft.thread_id
+        )
+        draft.message_id = sent.message_id
+    except TelegramError:
+        del sessions[draft.session_id]
+        raise
+
+
+async def scan_chat(update: Update, context: CallbackContext) -> None:
+    if not is_authorized(update):
+        return
+    if update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
+        await send_message_with_retry(update, context, "Импорт доступен только владельцу бота.")
+        return
+    original = update.effective_message
+    if (update.effective_chat.id != ALLOWED_TELEGRAM_GROUP_ID
+            or original.message_thread_id in (None, 1)):
+        await send_message_with_retry(update, context, "Отправьте /scan в нужной отдельной теме группы.")
+        return
+    if not check_rate_limit(update.effective_user.id):
+        await send_message_with_retry(update, context, "Слишком много запросов. Повторите позже.")
+        return
+    job = ScanStore().active(update.effective_chat.id, original.message_thread_id)
+    draft = Draft("", {}, update.effective_user.id, update.effective_chat.id,
+                  original.message_thread_id, original.message_id, purpose="scan_upload")
+    if job:
+        draft.purpose = "scan_control"
+        draft.job_id = job["id"]
+        draft.scan_summary = progress_text(job)
+        task = context.bot_data.get("scan_tasks", {}).get(job["id"])
+        draft.scan_running = task is not None and not task.done()
+    else:
+        # Replace an earlier upload prompt for this topic, leaving active jobs intact.
+        sessions = active_sessions(context)
+        for key, previous in list(sessions.items()):
+            if previous.purpose == "scan_upload" and previous.chat_id == draft.chat_id and previous.thread_id == draft.thread_id:
+                del sessions[key]
+    await send_draft(update, context, draft)
+
+
+async def scan_document(update: Update, context: CallbackContext) -> None:
+    if not is_authorized(update) or update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
+        return
+    original = update.effective_message
+    waiting = next((draft for draft in active_sessions(context).values()
+                    if draft.purpose == "scan_upload" and draft.owner_id == update.effective_user.id
+                    and draft.chat_id == update.effective_chat.id
+                    and draft.thread_id == original.message_thread_id), None)
+    if waiting is None:
+        return
+    document = original.document
+    if not document.file_name or not document.file_name.lower().endswith(".json"):
+        await send_message_with_retry(update, context, "Нужен файл JSON из экспорта Telegram Desktop.")
+        return
+    if document.file_size is None or document.file_size > MAX_EXPORT_BYTES:
+        await send_message_with_retry(update, context, "Размер JSON должен быть не больше 10 МБ.")
+        return
+    try:
+        file = await context.bot.get_file(document.file_id)
+        content = await file.download_as_bytearray()
+        result = await asyncio.to_thread(parse_export, content, waiting.chat_id,
+                                         waiting.thread_id, extract_links, context.bot.id)
+    except ExportError as error:
+        await send_message_with_retry(update, context, str(error))
+        return
+    except TelegramError:
+        await send_message_with_retry(update, context, "Не удалось загрузить файл. Отправьте JSON ещё раз.")
+        return
+    summary = (f"Текущая тема #{waiting.thread_id}\n"
+               f"Сообщений со ссылками: {result.matched_messages}\n"
+               f"Уникальных URL: {len(result.urls)}\n"
+               f"Повторов внутри экспорта: {result.occurrences - len(result.urls)}\n"
+               f"Пропущено сообщений из других тем: {result.other_messages}\n"
+               f"Пропущено без определённой темы: {result.unknown_messages}\n"
+               "Существующие ссылки будут пропущены при импорте.")
+    collections, error = await load_collections()
+    bound = await collection_for_chat(waiting.chat_id, waiting.thread_id)
+    draft = Draft("", collections, waiting.owner_id, waiting.chat_id, waiting.thread_id,
+                  original.message_id, purpose="scan", urls=result.urls,
+                  scan_summary=summary, bound_collection=bound, error=error)
+    if bound is not None and not error:
+        await select_bound_collection(draft)
+    await send_draft(update, context, draft)
+    active_sessions(context).pop(waiting.session_id, None)
+
+
+def start_scan_task(job, message_id, context):
+    tasks = context.bot_data.setdefault("scan_tasks", {})
+    current = tasks.get(job["id"])
+    if current is not None and not current.done():
+        return
+    ScanStore().start(job["id"], message_id)
+    tasks[job["id"]] = context.application.create_task(run_scan(job["id"], context))
+
+
+async def notify_scan(job, context):
+    try:
+        await context.bot.edit_message_text(
+            chat_id=job["chat_id"], message_id=job["message_id"], text=progress_text(job)
+        )
+    except TelegramError:
+        logger.warning("Could not update scan progress")
+
+
+async def run_scan(job_id, context):
+    store = ScanStore()
+    try:
+        while True:
+            job = store.get(job_id)
+            if job is None or job["state"] != "running":
+                return
+            if job["cursor"] >= len(job["urls"]):
+                store.state(job_id, "done")
+                await notify_scan(store.get(job_id), context)
+                return
+            try:
+                _, created = await asyncio.to_thread(
+                    save_once, job["urls"][job["cursor"]], job["collection_id"], job["tags"]
+                )
+            except ApiError as error:
+                store.state(job_id, "paused", str(error))
+                await notify_scan(store.get(job_id), context)
+                return
+            store.advance(job_id, job["cursor"], created)
+            latest = store.get(job_id)
+            if latest["cursor"] % 5 == 0:
+                await notify_scan(latest, context)
+            await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        store.state(job_id, "paused", "Обработка прервана. Используйте /scan для продолжения.")
+        raise
+    except Exception:
+        store.state(job_id, "paused", "Ошибка обработки. Используйте /scan для продолжения.")
+        logger.error("Scan worker stopped unexpectedly")
+        await notify_scan(store.get(job_id), context)
+    finally:
+        context.bot_data.get("scan_tasks", {}).pop(job_id, None)
+
+
 async def answer_callback(query, text=None):
     try:
         await query.answer(text)
@@ -364,7 +511,7 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
     if update.effective_user.id != draft.owner_id:
         await answer_callback(query, "Кнопки доступны только автору запроса.")
         return
-    if draft.purpose in ("bind", "unbind") and update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
+    if draft.purpose in ("bind", "unbind", "scan", "scan_upload", "scan_control") and update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
         await answer_callback(query, "Привязку может менять только владелец бота.")
         return
     message = query.message
@@ -388,6 +535,24 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
         if operation == "cancel":
             del sessions[draft.session_id]
             await query.edit_message_text("Отменено.")
+            return
+        if operation in ("scan_resume", "scan_cancel"):
+            store = ScanStore()
+            job = store.get(draft.job_id)
+            if job is None or job["owner_id"] != draft.owner_id or job["chat_id"] != draft.chat_id or job["thread_id"] != (draft.thread_id or 0):
+                await query.edit_message_text("Импорт недоступен.")
+                return
+            del sessions[draft.session_id]
+            if operation == "scan_cancel":
+                store.state(job["id"], "cancelled")
+                await query.edit_message_text(
+                    "Импорт отменён. Уже сохранённые ссылки останутся. Текущий запрос может завершиться."
+                )
+            elif job["state"] in ("queued", "running", "paused"):
+                await query.edit_message_text("Продолжаю импорт…")
+                start_scan_task(job, draft.message_id, context)
+            else:
+                await query.edit_message_text(progress_text(job))
             return
         if operation == "unbind_save":
             current = await collection_for_chat(draft.chat_id, draft.thread_id)
@@ -416,6 +581,12 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
                 f"Привязка сохранена: {collections[draft.collection][:200]} (#{draft.collection}). "
                 "Для новых URL останутся выбор тегов и подтверждение."
             )
+            return
+        if operation == "save" and draft.purpose == "scan":
+            job = ScanStore().create(draft)
+            del sessions[draft.session_id]
+            await query.edit_message_text("Импорт подтверждён. Запускаю обработку…")
+            start_scan_task(job, draft.message_id, context)
             return
         if operation == "save":
             del sessions[draft.session_id]
@@ -558,6 +729,8 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("bind", bind_chat))
     application.add_handler(CommandHandler("unbind", unbind_chat))
+    application.add_handler(CommandHandler("scan", scan_chat))
+    application.add_handler(MessageHandler(filters.Document.ALL, scan_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback))
     application.add_error_handler(error_handler)

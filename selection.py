@@ -32,6 +32,10 @@ class Draft:
     message_id: int | None = None
     bound_collection: int | None = None
     purpose: str = "save"
+    urls: tuple = ()
+    scan_summary: str = ""
+    job_id: str = ""
+    scan_running: bool = False
     stage: str = "collections"
     tags: dict = field(default_factory=dict)
     chosen: dict = field(default_factory=dict)
@@ -55,6 +59,17 @@ class Draft:
                 label, callback_data=f"lw:{self.session_id}:{self.revision}:{token}"
             )
 
+        if self.purpose == "scan_upload":
+            text = ("Пришлите JSON-экспорт Telegram Desktop в эту тему (до 10 МБ).\n"
+                    "Будут выбраны только URL текущей темы. Сначала появится предварительный просмотр.")
+            return {"text": text, "reply_markup": InlineKeyboardMarkup([[button("Отмена", "cancel")]])}
+
+        if self.purpose == "scan_control":
+            if not self.scan_running:
+                rows.append([button("Продолжить импорт", "scan_resume")])
+            rows.append([button("Отменить импорт", "scan_cancel"), button("Закрыть", "cancel")])
+            return {"text": self.scan_summary, "reply_markup": InlineKeyboardMarkup(rows)}
+
         if self.purpose == "unbind":
             text = (f"Удалить привязку этого чата/темы к коллекции #{self.bound_collection}?\n"
                     "Для новых URL бот снова предложит выбрать коллекцию.")
@@ -72,6 +87,8 @@ class Draft:
 
         text = ("Привязка коллекции для текущего чата/темы\n\n"
                 if self.purpose == "bind" else self.url + "\n\n")
+        if self.purpose == "scan":
+            text = self.scan_summary + "\n\n"
         if self.error:
             text += self.error
             rows.append([button("Повторить загрузку", "retry")])
@@ -106,7 +123,7 @@ class Draft:
             if self.stage == "tags":
                 rows.append([button("Готово", "done")])
             elif self.stage == "confirm":
-                rows.append([button("Сохранить", "save")])
+                rows.append([button("Начать импорт" if self.purpose == "scan" else "Сохранить", "save")])
         if self.stage == "confirm" or (self.stage == "tags" and self.bound_collection is None):
             rows.append([button("Назад", "back")])
         rows.append([button("Отмена", "cancel")])

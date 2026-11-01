@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -773,3 +774,108 @@ async def test_unbind_already_unbound(update, context, workflow):
     assert "без привязки" in update.message.reply_text.await_args.args[0]
     assert not context.bot_data
     workflow[0].assert_not_called()
+
+async def prepare_scan(update, context):
+    import json
+    group(update, user_id=100, thread=9)
+    await bot.scan_chat(update, context)
+    payload = json.dumps({"id": 1872870761, "messages": [
+        {"id": 9, "type": "service", "action": "topic_created"},
+        {"id": 10, "type": "message", "reply_to_message_id": 9, "text": "https://first.com"},
+        {"id": 11, "type": "message", "reply_to_message_id": 9, "text": "https://second.com"},
+    ]}).encode()
+    update.message.document.file_name = "result.json"
+    update.message.document.file_size = len(payload)
+    context.bot.get_file = AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=payload)))
+    context.bot.id = 77
+    update.message.message_id = 24
+    await bot.scan_document(update, context)
+
+
+@pytest.mark.asyncio
+async def test_scan_preview_does_not_save_until_confirmation(update, context, workflow):
+    from scan_jobs import ScanStore
+    await prepare_scan(update, context)
+    assert draft(context).purpose == "scan" and len(draft(context).urls) == 2
+    assert "Уникальных URL: 2" in update.message.reply_text.await_args.kwargs["text"]
+    await press(update, context, "pick", 2)
+    await press(update, context, "pick", 3)
+    await press(update, context, "done")
+    assert ScanStore().active(-1001872870761, 9) is None
+    workflow[2].assert_not_called()
+    data = data_for(context, "save")
+    with patch("bot.start_scan_task") as start:
+        await press(update, context, data=data)
+        await press(update, context, data=data)
+        start.assert_called_once()
+    job = ScanStore().active(-1001872870761, 9)
+    assert job["urls"] == ["https://first.com", "https://second.com"]
+    assert job["collection_id"] == 2 and job["tags"] == {3: "Knots"}
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scan_resume_control_and_cancel(update, context, workflow):
+    from scan_jobs import ScanStore
+    await prepare_scan(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "done")
+    with patch("bot.start_scan_task"):
+        await press(update, context, "save")
+    job = ScanStore().active(-1001872870761, 9)
+    await bot.scan_chat(update, context)
+    assert draft(context).purpose == "scan_control"
+    data = data_for(context, "scan_cancel")
+    update.effective_user.id = 201
+    await press(update, context, data=data)
+    assert ScanStore().get(job["id"])["state"] == "queued"
+    update.effective_user.id = 100
+    await press(update, context, data=data)
+    assert ScanStore().get(job["id"])["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_scan_document_requires_pending_owner_and_same_topic(update, context, workflow):
+    group(update, user_id=200, thread=9)
+    await bot.scan_chat(update, context)
+    assert not context.bot_data
+    group(update, user_id=100, thread=9)
+    await bot.scan_chat(update, context)
+    context.bot.get_file = AsyncMock()
+    group(update, user_id=200, thread=9)
+    await bot.scan_document(update, context)
+    group(update, user_id=100, thread=42)
+    await bot.scan_document(update, context)
+    context.bot.get_file.assert_not_called()
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scan_bad_export_can_be_replaced(update, context, workflow):
+    group(update, user_id=100, thread=9)
+    await bot.scan_chat(update, context)
+    update.message.document.file_name = "result.json"
+    update.message.document.file_size = 5
+    context.bot.get_file = AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=b"bad")))
+    await bot.scan_document(update, context)
+    assert draft(context).purpose == "scan_upload"
+    assert "JSON" in update.message.reply_text.await_args.args[0]
+    await press(update, context, "cancel")
+    assert not context.bot_data["selection_sessions"]
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scan_wrong_file_size_and_general_topic(update, context, workflow):
+    group(update, user_id=100, thread=1)
+    await bot.scan_chat(update, context)
+    assert not context.bot_data
+    group(update, user_id=100, thread=9)
+    await bot.scan_chat(update, context)
+    context.bot.get_file = AsyncMock()
+    update.message.document.file_name = "result.html"
+    await bot.scan_document(update, context)
+    update.message.document.file_name = "result.json"
+    update.message.document.file_size = 11 * 1024 * 1024
+    await bot.scan_document(update, context)
+    context.bot.get_file.assert_not_called()
