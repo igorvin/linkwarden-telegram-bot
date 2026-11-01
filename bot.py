@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, CallbackContext
 from telegram.error import Conflict, TelegramError, TimedOut, NetworkError
 from linkwarden import ApiError, get_collections, get_tags
-from submissions import save_once, get_binding, set_binding
+from submissions import save_once, get_binding, set_binding, get_default_tags, set_default_tags
 from scan_export import ExportError, MAX_EXPORT_BYTES, parse_export
 from scan_jobs import ScanStore, progress_text
 from selection import Draft, SESSION_TTL, parse_topic_collections
@@ -336,13 +336,66 @@ async def load_tags(draft):
     draft.page = 0
     try:
         draft.tags = await asyncio.to_thread(get_tags)
+        if draft.purpose in ("save", "scan") and not draft.defaults_loaded:
+            defaults = await asyncio.to_thread(get_default_tags, draft.chat_id, draft.thread_id)
+            draft.chosen = {key: name for key, name in draft.tags.items() if key in defaults}
+            draft.defaults_loaded = True
         draft.chosen = {key: name for key, name in draft.tags.items() if key in draft.chosen}
         draft.error = ""
-        if not draft.tags:
+        if not draft.tags and draft.purpose != "default_tags":
             draft.stage = "confirm"
     except ApiError as error:
         draft.error = str(error)
 
+
+
+
+async def load_settings(draft):
+    draft.purpose = "settings"
+    draft.stage = "collections"
+    draft.error = ""
+    draft.page = 0
+    draft.bound_collection = await collection_for_chat(draft.chat_id, draft.thread_id)
+    collections, error = await load_collections()
+    draft.collections = collections
+    if draft.bound_collection is None:
+        collection = "Ручной выбор"
+    else:
+        name = collections.get(draft.bound_collection, "Недоступна")
+        collection = f"{name[:200]} (#{draft.bound_collection})"
+    ids = await asyncio.to_thread(get_default_tags, draft.chat_id, draft.thread_id)
+    tag_error = ""
+    try:
+        tags = await asyncio.to_thread(get_tags)
+    except ApiError as failure:
+        tags = {}
+        tag_error = str(failure)
+    names = [tags.get(tag_id, f"#{tag_id}")[:75] for tag_id in ids[:10]]
+    description = ", ".join(names) if names else "Нет"
+    if len(ids) > 10:
+        description += f" и ещё {len(ids) - 10}"
+    draft.settings_summary = (
+        f"Настройки текущего чата/темы\nКоллекция: {collection}\n"
+        f"Теги по умолчанию: {description}"
+    )
+    if error or tag_error:
+        draft.settings_summary += "\nЧасть данных Linkwarden недоступна. Можно обновить меню."
+
+
+async def settings_chat(update: Update, context: CallbackContext) -> None:
+    if not is_authorized(update):
+        return
+    if update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
+        await send_message_with_retry(update, context, "Настройки доступны только владельцу бота.")
+        return
+    if not check_rate_limit(update.effective_user.id):
+        await send_message_with_retry(update, context, "Слишком много запросов. Повторите позже.")
+        return
+    original = update.effective_message
+    draft = Draft("", {}, update.effective_user.id, update.effective_chat.id,
+                  original.message_thread_id, original.message_id, purpose="settings")
+    await load_settings(draft)
+    await send_draft(update, context, draft)
 
 
 async def send_draft(update, context, draft):
@@ -511,7 +564,7 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
     if update.effective_user.id != draft.owner_id:
         await answer_callback(query, "Кнопки доступны только автору запроса.")
         return
-    if draft.purpose in ("bind", "unbind", "scan", "scan_upload", "scan_control") and update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
+    if draft.purpose in ("bind", "unbind", "scan", "scan_upload", "scan_control", "settings", "default_tags") and update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
         await answer_callback(query, "Привязку может менять только владелец бота.")
         return
     message = query.message
@@ -535,6 +588,48 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
         if operation == "cancel":
             del sessions[draft.session_id]
             await query.edit_message_text("Отменено.")
+            return
+        if operation in ("settings_bind", "settings_unbind", "settings_tags", "settings_refresh"):
+            changed = replace(draft, actions={}, busy=False, chosen={}, page=0, error="")
+            if operation == "settings_bind":
+                changed.purpose = "bind"
+                changed.bound_collection = None
+                changed.collection = None
+                changed.stage = "collections"
+                changed.collections, changed.error = await load_collections()
+            elif operation == "settings_unbind":
+                changed.bound_collection = await collection_for_chat(draft.chat_id, draft.thread_id)
+                if changed.bound_collection is None:
+                    await load_settings(changed)
+                else:
+                    changed.purpose = "unbind"
+                    changed.stage = "confirm"
+            elif operation == "settings_tags":
+                changed.purpose = "default_tags"
+                changed.bound_collection = None
+                ids = await asyncio.to_thread(get_default_tags, draft.chat_id, draft.thread_id)
+                changed.chosen = dict.fromkeys(ids, "")
+                await load_tags(changed)
+            else:
+                await load_settings(changed)
+            await query.edit_message_text(**changed.view())
+            sessions[draft.session_id] = changed
+            return
+        if operation == "tags_save":
+            changed = replace(draft, actions={}, busy=False)
+            try:
+                tags = await asyncio.to_thread(get_tags) if draft.chosen else {}
+                if any(key not in tags for key in draft.chosen):
+                    raise ApiError("Список тегов изменился. Обновите выбор перед сохранением.")
+            except ApiError as error:
+                changed.stage = "tags"
+                changed.error = str(error)
+                await query.edit_message_text(**changed.view())
+                sessions[draft.session_id] = changed
+                return
+            await asyncio.to_thread(set_default_tags, draft.chat_id, draft.thread_id, tuple(draft.chosen))
+            del sessions[draft.session_id]
+            await query.edit_message_text("Теги по умолчанию сохранены. Они будут отмечены для новых URL и импортов.")
             return
         if operation in ("scan_resume", "scan_cancel"):
             store = ScanStore()
@@ -607,7 +702,13 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
         if operation == "back":
             changed.page = 0
             changed.error = ""
-            if draft.purpose == "bind":
+            if draft.purpose == "default_tags":
+                if draft.stage == "confirm":
+                    changed.stage = "tags"
+                    await load_tags(changed)
+                else:
+                    await load_settings(changed)
+            elif draft.purpose == "bind":
                 changed.stage = "collections"
                 changed.collections, changed.error = await load_collections()
             elif draft.stage == "confirm":
@@ -730,6 +831,7 @@ def main() -> None:
     application.add_handler(CommandHandler("bind", bind_chat))
     application.add_handler(CommandHandler("unbind", unbind_chat))
     application.add_handler(CommandHandler("scan", scan_chat))
+    application.add_handler(CommandHandler("settings", settings_chat))
     application.add_handler(MessageHandler(filters.Document.ALL, scan_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback))

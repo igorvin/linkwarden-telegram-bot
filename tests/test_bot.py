@@ -879,3 +879,143 @@ async def test_scan_wrong_file_size_and_general_topic(update, context, workflow)
     update.message.document.file_size = 11 * 1024 * 1024
     await bot.scan_document(update, context)
     context.bot.get_file.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_settings_menu_shows_current_scope_and_default_tags(update, context, workflow):
+    from submissions import set_binding, set_default_tags
+    group(update, user_id=100, thread=9)
+    set_binding(-1001872870761, 9, 2)
+    set_default_tags(-1001872870761, 9, (3,))
+    await bot.settings_chat(update, context)
+    summary = update.message.reply_text.await_args.kwargs["text"]
+    assert "Fishing" in summary and "Knots" in summary
+    assert update.message.reply_text.await_args.kwargs["message_thread_id"] == 9
+    assert draft(context).purpose == "settings"
+    assert ("settings_unbind", None) in draft(context).actions.values()
+
+
+@pytest.mark.asyncio
+async def test_settings_tags_confirm_then_preselect_for_any_member(update, context, workflow):
+    from submissions import get_default_tags, set_binding
+    group(update, user_id=100, thread=9)
+    set_binding(-1001872870761, 9, 2)
+    await bot.settings_chat(update, context)
+    await press(update, context, "settings_tags")
+    await press(update, context, "pick", 3)
+    await press(update, context, "done")
+    assert get_default_tags(-1001872870761, 9) == ()
+    await press(update, context, "tags_save")
+    assert get_default_tags(-1001872870761, 9) == (3,)
+    group(update, user_id=200, thread=9)
+    update.message.message_id = 24
+    await bot.handle_message(update, context)
+    assert draft(context).chosen == {3: "Knots"}
+    await press(update, context, "pick", 3)
+    await press(update, context, "done")
+    await press(update, context, "back")
+    assert draft(context).chosen == {}  # Back must not reapply deselected defaults.
+    await press(update, context, "done")
+    await press(update, context, "save")
+    workflow[2].assert_called_once_with("https://example.com", 2, {})
+
+
+@pytest.mark.asyncio
+async def test_settings_rebind_and_unbind_use_existing_flow(update, context, workflow):
+    from submissions import set_binding, get_binding
+    group(update, user_id=100, thread=9)
+    set_binding(-1001872870761, 9, 2)
+    await bot.settings_chat(update, context)
+    await press(update, context, "settings_bind")
+    assert draft(context).bound_collection is None
+    await press(update, context, "pick", 1)
+    await press(update, context, "bind_save")
+    assert get_binding(-1001872870761, 9) == 1
+    await bot.settings_chat(update, context)
+    await press(update, context, "settings_unbind")
+    await press(update, context, "unbind_save")
+    assert get_binding(-1001872870761, 9) == 0
+
+
+@pytest.mark.asyncio
+async def test_settings_defaults_cancel_back_and_clear(update, context, workflow):
+    from submissions import get_default_tags, set_default_tags
+    set_default_tags(100, None, (3,))
+    await bot.settings_chat(update, context)
+    await press(update, context, "settings_tags")
+    assert draft(context).chosen == {3: "Knots"}
+    await press(update, context, "pick", 4)
+    await press(update, context, "back")
+    assert draft(context).purpose == "settings"
+    assert get_default_tags(100, None) == (3,)
+    await press(update, context, "settings_tags")
+    await press(update, context, "pick", 3)
+    await press(update, context, "done")
+    await press(update, context, "tags_save")
+    assert get_default_tags(100, None) == ()
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_settings_owner_checks_command_and_each_callback(update, context, workflow, monkeypatch):
+    from submissions import get_default_tags
+    group(update, user_id=200, thread=9)
+    await bot.settings_chat(update, context)
+    assert not context.bot_data
+    workflow[0].assert_not_called()
+    group(update, user_id=100, thread=9)
+    await bot.settings_chat(update, context)
+    data = data_for(context, "settings_tags")
+    update.effective_user.id = 200
+    await press(update, context, data=data)
+    assert draft(context).purpose == "settings"
+    update.effective_user.id = 100
+    await press(update, context, data=data)
+    await press(update, context, "done")
+    data = data_for(context, "tags_save")
+    monkeypatch.setattr(bot, "ALLOWED_TELEGRAM_USER_ID", 999)
+    await press(update, context, data=data)
+    assert get_default_tags(-1001872870761, 9) == ()
+
+
+@pytest.mark.asyncio
+async def test_settings_survives_api_failure_and_handles_deleted_tag(update, context, workflow):
+    from submissions import set_default_tags, get_default_tags
+    set_default_tags(100, None, (3,))
+    workflow[0].side_effect = [ApiError("HTTP 503"), {1: "Inbox"}]
+    workflow[1].side_effect = [ApiError("HTTP 503"), {3: "Knots"}, {}]
+    await bot.settings_chat(update, context)
+    assert "недоступна" in update.message.reply_text.await_args.kwargs["text"]
+    await press(update, context, "settings_tags")
+    await press(update, context, "done")
+    await press(update, context, "tags_save")
+    assert draft(context).error
+    assert get_default_tags(100, None) == (3,)
+    workflow[1].side_effect = None
+    workflow[1].return_value = {}
+    await press(update, context, "retry")
+    await press(update, context, "done")
+    await press(update, context, "tags_save")
+    assert get_default_tags(100, None) == ()
+
+
+@pytest.mark.asyncio
+async def test_topic_defaults_do_not_leak_and_scan_uses_its_defaults(update, context, workflow):
+    from submissions import set_default_tags
+    set_default_tags(-1001872870761, 9, (3,))
+    group(update, user_id=100, thread=42)
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 1)
+    assert draft(context).chosen == {}
+    context.bot_data.clear()
+    await prepare_scan(update, context)
+    await press(update, context, "pick", 1)
+    assert draft(context).purpose == "scan" and draft(context).chosen == {3: "Knots"}
+
+
+@pytest.mark.asyncio
+async def test_missing_default_tag_is_not_reintroduced(update, context, workflow):
+    from submissions import set_default_tags
+    set_default_tags(100, None, (3, 99))
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 1)
+    assert draft(context).chosen == {3: "Knots"}

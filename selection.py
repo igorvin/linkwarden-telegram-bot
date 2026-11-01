@@ -32,6 +32,8 @@ class Draft:
     message_id: int | None = None
     bound_collection: int | None = None
     purpose: str = "save"
+    defaults_loaded: bool = False
+    settings_summary: str = ""
     urls: tuple = ()
     scan_summary: str = ""
     job_id: str = ""
@@ -58,6 +60,16 @@ class Draft:
             return InlineKeyboardButton(
                 label, callback_data=f"lw:{self.session_id}:{self.revision}:{token}"
             )
+
+        if self.purpose == "settings":
+            rows = [[button("Выбрать коллекцию", "settings_bind")]]
+            if self.bound_collection is not None:
+                rows.append([button("Удалить привязку", "settings_unbind")])
+            rows.extend([
+                [button("Теги по умолчанию", "settings_tags")],
+                [button("Обновить", "settings_refresh"), button("Закрыть", "cancel")],
+            ])
+            return {"text": self.settings_summary, "reply_markup": InlineKeyboardMarkup(rows)}
 
         if self.purpose == "scan_upload":
             text = ("Пришлите JSON-экспорт Telegram Desktop в эту тему (до 10 МБ).\n"
@@ -98,11 +110,19 @@ class Draft:
                 text += "Выберите коллекцию"
             elif self.stage == "tags":
                 items = self.tags
-                text += f"Коллекция: {self.collections[self.collection][:200]} (#{self.collection})\n"
+                if self.purpose == "default_tags":
+                    text += "Теги по умолчанию для текущего чата/темы\n"
+                else:
+                    text += f"Коллекция: {self.collections[self.collection][:200]} (#{self.collection})\n"
                 text += "Отметьте теги и нажмите «Готово»"
+                if not items:
+                    text += "\nДоступных тегов нет. Можно сохранить пустой список."
             else:
                 items = self.chosen
-                text += f"Коллекция: {self.collections[self.collection][:200]} (#{self.collection})\n"
+                if self.purpose == "default_tags":
+                    text += "Сохранить теги по умолчанию для текущего чата/темы?\n"
+                else:
+                    text += f"Коллекция: {self.collections[self.collection][:200]} (#{self.collection})\n"
                 text += "Теги:" if items else "Без тегов"
             start = self.page * PAGE_SIZE
             for item_id, name in islice(items.items(), start, start + PAGE_SIZE):
@@ -122,6 +142,8 @@ class Draft:
                 rows.append(nav)
             if self.stage == "tags":
                 rows.append([button("Готово", "done")])
+            elif self.stage == "confirm" and self.purpose == "default_tags":
+                rows.append([button("Сохранить настройки", "tags_save")])
             elif self.stage == "confirm":
                 rows.append([button("Начать импорт" if self.purpose == "scan" else "Сохранить", "save")])
         if self.stage == "confirm" or (self.stage == "tags" and self.bound_collection is None):

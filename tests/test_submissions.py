@@ -110,3 +110,24 @@ def test_binding_migration_preserves_previous_journal(ledger_env):
     ledger = SubmissionLedger()
     assert ledger.claim("existing") == (False, "saved", 77)
     assert get_binding(-100, 9) == 1
+
+def test_default_tags_persist_and_are_scoped(ledger_env):
+    from submissions import get_default_tags, set_default_tags, set_binding, get_binding
+    set_binding(-100, 9, 1)
+    set_default_tags(-100, 9, (2, 3, 2))
+    set_default_tags(-100, 42, (4,))
+    set_default_tags(123, None, (5,))
+    assert get_default_tags(-100, 9) == (2, 3)
+    assert get_default_tags(-100, 42) == (4,)
+    assert get_default_tags(123, None) == (5,)
+    assert get_default_tags(456, None) == ()
+    set_default_tags(-100, 9, ())
+    assert get_default_tags(-100, 9) == ()
+    assert get_binding(-100, 9) == 1
+
+
+@pytest.mark.parametrize("ids", [(0,), (-1,), (True,), ("3",)])
+def test_invalid_default_tags_are_rejected(ledger_env, ids):
+    from submissions import set_default_tags
+    with pytest.raises(ValueError):
+        set_default_tags(-100, 9, ids)

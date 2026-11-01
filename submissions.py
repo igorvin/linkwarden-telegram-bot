@@ -1,5 +1,6 @@
 """Durable claims prevent duplicate POSTs, including after an unknown outcome."""
 from contextlib import contextmanager
+import json
 import hashlib
 import os
 from pathlib import Path
@@ -21,6 +22,13 @@ class SubmissionLedger:
                 chat_id INTEGER NOT NULL,
                 thread_id INTEGER NOT NULL,
                 collection_id INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, thread_id)
+            )""")
+
+            db.execute("""CREATE TABLE IF NOT EXISTS topic_preferences (
+                chat_id INTEGER NOT NULL,
+                thread_id INTEGER NOT NULL,
+                default_tags TEXT NOT NULL,
                 PRIMARY KEY (chat_id, thread_id)
             )""")
 
@@ -104,4 +112,27 @@ def set_binding(chat_id, thread_id, collection_id):
             """INSERT INTO topic_bindings VALUES (?, ?, ?)
             ON CONFLICT(chat_id, thread_id) DO UPDATE SET collection_id=excluded.collection_id""",
             (chat_id, thread_id or 0, collection_id),
+        )
+
+
+def get_default_tags(chat_id, thread_id):
+    ledger = SubmissionLedger()
+    with ledger.connect() as db:
+        row = db.execute(
+            "SELECT default_tags FROM topic_preferences WHERE chat_id=? AND thread_id=?",
+            (chat_id, thread_id or 0),
+        ).fetchone()
+    return tuple(json.loads(row[0])) if row else ()
+
+
+def set_default_tags(chat_id, thread_id, tag_ids):
+    ids = tuple(dict.fromkeys(tag_ids))
+    if any(type(tag_id) is not int or tag_id <= 0 for tag_id in ids):
+        raise ValueError("Invalid tag IDs")
+    ledger = SubmissionLedger()
+    with ledger.connect() as db:
+        db.execute(
+            """INSERT INTO topic_preferences VALUES (?, ?, ?)
+            ON CONFLICT(chat_id, thread_id) DO UPDATE SET default_tags=excluded.default_tags""",
+            (chat_id, thread_id or 0, json.dumps(ids)),
         )
