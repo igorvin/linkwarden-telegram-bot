@@ -152,3 +152,39 @@ def get_link_metadata(link_id):
         raise ApiError("Не удалось прочитать коллекцию ссылки.")
     tags = options(link.get("tags"))
     return collection["name"], tuple(tags.values())
+
+
+def search_links(query, collection_id=None, cursor=None):
+    params = {"searchQueryString": query}
+    if collection_id is not None:
+        params["collectionId"] = collection_id
+    if cursor is not None:
+        params["cursor"] = cursor
+    body = request("GET", "search", params=params)
+    data = body.get("data")
+    if body.get("success") is not True:
+        raise ApiError("Linkwarden не смог выполнить поиск.")
+    # Meilisearch returns an empty array when there are no hits.
+    if isinstance(data, list) and not data:
+        return (), None
+    if not isinstance(data, dict) or not isinstance(data.get("links"), list) or "nextCursor" not in data:
+        raise ApiError("Некорректная страница результатов поиска.")
+    next_cursor = data["nextCursor"]
+    if next_cursor is not None and (type(next_cursor) is not int or next_cursor <= 0 or next_cursor == cursor):
+        raise ApiError("Некорректный указатель следующей страницы поиска.")
+    results = []
+    for row in data["links"]:
+        if (not isinstance(row, dict) or type(row.get("id")) is not int or row["id"] <= 0
+                or type(row.get("collectionId")) is not int
+                or not isinstance(row.get("collection"), dict)
+                or not isinstance(row["collection"].get("name"), str)
+                or not isinstance(row.get("name"), (str, type(None)))):
+            raise ApiError("Некорректный результат поиска.")
+        if collection_id is not None and row["collectionId"] != collection_id:
+            raise ApiError("Ответ поиска вышел за пределы коллекции текущей темы.")
+        tags = options(row.get("tags"))
+        results.append({
+            "id": row["id"], "name": row.get("name") or f"Ссылка #{row['id']}",
+            "collection": row["collection"]["name"], "tags": tuple(tags.values()),
+        })
+    return tuple(results), next_cursor

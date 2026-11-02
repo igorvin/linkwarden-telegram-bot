@@ -190,3 +190,46 @@ def test_public_url_rejects_embedded_whitespace(monkeypatch):
     from linkwarden import public_link_url
     monkeypatch.setenv("LINKWARDEN_PUBLIC_URL", "https://ex ample.com")
     assert public_link_url(12) is None
+
+def search_result(link_id, collection_id=2):
+    return {"id": link_id, "name": "Result", "collectionId": collection_id,
+            "collection": {"name": "Fishing"}, "tags": [{"id": 3, "name": "Knots"}]}
+
+
+def test_search_api_schema_and_scope(transport):
+    from linkwarden import search_links
+    transport.return_value = response({"success": True, "data": {"links": [search_result(8)], "nextCursor": 7}})
+    rows, cursor = search_links("knot", 2, 9)
+    assert rows[0]["name"] == "Result" and rows[0]["tags"] == ("Knots",)
+    assert cursor == 7
+    assert transport.call_args.kwargs["params"] == {"searchQueryString": "knot", "collectionId": 2, "cursor": 9}
+
+
+def test_search_private_scope_and_meili_empty(transport):
+    from linkwarden import search_links
+    transport.return_value = response({"success": True, "data": []})
+    assert search_links("nothing") == ((), None)
+    assert transport.call_args.kwargs["params"] == {"searchQueryString": "nothing"}
+
+
+@pytest.mark.parametrize("body", [
+    {"success": False, "data": {"links": [], "nextCursor": None}},
+    {"success": True, "data": {"links": [], "nextCursor": True}},
+    {"success": True, "data": {"links": [], "nextCursor": 9}},
+    {"success": True, "data": {"links": [], "nextCursor": 0}},
+    {"success": True, "data": {"links": []}},
+    {"response": []},
+    {"success": True, "data": {"links": [search_result(8, 3)], "nextCursor": None}},
+    {"success": True, "data": {"links": [{"id": 1}], "nextCursor": None}},
+])
+def test_search_rejects_malformed_or_out_of_scope_results(transport, body):
+    from linkwarden import search_links
+    transport.return_value = response(body)
+    with pytest.raises(ApiError):
+        search_links("knot", 2, 9)
+
+
+def test_search_empty_intermediate_page_retains_cursor(transport):
+    from linkwarden import search_links
+    transport.return_value = response({"success": True, "data": {"links": [], "nextCursor": 100}})
+    assert search_links("knot", 2, 50) == ((), 100)

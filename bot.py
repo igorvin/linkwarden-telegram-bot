@@ -6,11 +6,11 @@ import sys
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, CallbackContext
 from telegram.error import Conflict, TelegramError, TimedOut, NetworkError
-from linkwarden import ApiError, get_collections, get_tags, get_link_metadata, public_link_url
+from linkwarden import ApiError, get_collections, get_tags, get_link_metadata, public_link_url, search_links
 from submissions import save_once, get_binding, set_binding, get_default_tags, set_default_tags
 from scan_export import ExportError, MAX_EXPORT_BYTES, parse_export
 from scan_jobs import ScanStore, progress_text
-from selection import Draft, SESSION_TTL, parse_topic_collections
+from selection import Draft, SESSION_TTL, SEARCH_PAGE_SIZE, parse_topic_collections
 from dataclasses import replace
 import re
 from urllib.parse import urlparse
@@ -350,6 +350,53 @@ async def load_tags(draft):
 
 
 
+
+async def load_search_page(draft, cursor=None):
+    try:
+        if cursor is not None and any(page["cursor"] == cursor for page in draft.search_pages):
+            raise ApiError("Повтор страницы поиска. Обновите поиск.")
+        items, next_cursor = await asyncio.to_thread(
+            search_links, draft.search_query, draft.collection, cursor
+        )
+        page = {"items": items, "next_cursor": next_cursor, "cursor": cursor}
+        if cursor is None:
+            draft.search_pages = (page,)
+            draft.search_batch = 0
+        else:
+            draft.search_pages += (page,)
+            draft.search_batch += 1
+        draft.page = 0
+        draft.error = ""
+    except ApiError as error:
+        draft.error = str(error)
+
+
+async def search_chat(update: Update, context: CallbackContext) -> None:
+    if not is_authorized(update):
+        return
+    query = " ".join(context.args or []).strip()
+    if not query or len(query) > 200:
+        await send_message_with_retry(update, context, "Используйте /search текст (до 200 символов). Например: /search узлы")
+        return
+    if not check_rate_limit(update.effective_user.id):
+        await send_message_with_retry(update, context, "Слишком много запросов. Повторите позже.")
+        return
+    original = update.effective_message
+    collection = None
+    if update.effective_chat.type in ("group", "supergroup"):
+        collection = await collection_for_chat(update.effective_chat.id, original.message_thread_id)
+        if collection is None:
+            await send_message_with_retry(
+                update, context, "Для поиска в теме владелец должен привязать коллекцию через /bind."
+            )
+            return
+    draft = Draft("", {}, update.effective_user.id, update.effective_chat.id,
+                  original.message_thread_id, original.message_id,
+                  purpose="search", collection=collection, search_query=query)
+    await load_search_page(draft)
+    await send_draft(update, context, draft)
+
+
 async def load_settings(draft):
     draft.purpose = "settings"
     draft.stage = "collections"
@@ -608,6 +655,9 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
         await answer_callback(query, "Действие уже выполняется.")
         return
 
+    if draft.purpose == "search" and not check_rate_limit(update.effective_user.id):
+        await answer_callback(query, "Слишком много запросов. Повторите позже.")
+        return
     draft.busy = True
     try:
         await answer_callback(query)
@@ -615,6 +665,34 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
         if operation == "cancel":
             del sessions[draft.session_id]
             await query.edit_message_text("Отменено.")
+            return
+        if operation in ("search_prev", "search_next", "search_refresh"):
+            if draft.chat_id == ALLOWED_TELEGRAM_GROUP_ID:
+                current = await collection_for_chat(draft.chat_id, draft.thread_id)
+                if current is None or current != draft.collection:
+                    del sessions[draft.session_id]
+                    await query.edit_message_text("Привязка темы изменилась. Повторите /search.")
+                    return
+            changed = replace(draft, actions={}, busy=False, error="")
+            if operation == "search_refresh" or not changed.search_pages:
+                await load_search_page(changed)
+            elif operation == "search_prev":
+                if changed.page:
+                    changed.page -= 1
+                else:
+                    changed.search_batch -= 1
+                    changed.page = max(0, (len(changed.search_pages[changed.search_batch]["items"]) - 1) // SEARCH_PAGE_SIZE)
+            else:
+                batch = changed.search_pages[changed.search_batch]
+                if (changed.page + 1) * SEARCH_PAGE_SIZE < len(batch["items"]):
+                    changed.page += 1
+                elif changed.search_batch + 1 < len(changed.search_pages):
+                    changed.search_batch += 1
+                    changed.page = 0
+                else:
+                    await load_search_page(changed, batch["next_cursor"])
+            await query.edit_message_text(**changed.view())
+            sessions[draft.session_id] = changed
             return
         if operation in ("settings_bind", "settings_unbind", "settings_tags", "settings_refresh"):
             changed = replace(draft, actions={}, busy=False, chosen={}, page=0, error="")
@@ -859,6 +937,7 @@ def main() -> None:
     application.add_handler(CommandHandler("unbind", unbind_chat))
     application.add_handler(CommandHandler("scan", scan_chat))
     application.add_handler(CommandHandler("settings", settings_chat))
+    application.add_handler(CommandHandler("search", search_chat))
     application.add_handler(MessageHandler(filters.Document.ALL, scan_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback))

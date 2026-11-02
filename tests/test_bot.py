@@ -1101,3 +1101,160 @@ async def test_invalid_public_url_keeps_success_without_exposing_secret(update, 
     reply = update.callback_query.edit_message_text.await_args.kwargs
     assert "сохранена" in reply["text"] and "reply_markup" not in reply
     assert "secret" not in str(reply)
+
+
+def result_item(link_id):
+    return {"id": link_id, "name": f"Result {link_id}", "collection": "Fishing", "tags": ("Knots",)}
+
+
+@pytest.fixture
+def search_transport():
+    with patch("bot.search_links", return_value=((result_item(12),), None)) as search:
+        yield search
+
+
+@pytest.mark.asyncio
+async def test_group_search_is_available_to_members_and_topic_scoped(update, context, workflow, search_transport):
+    from submissions import set_binding
+    group(update, user_id=200, thread=9)
+    set_binding(-1001872870761, 9, 2)
+    context.args = ["узлы"]
+    await bot.search_chat(update, context)
+    search_transport.assert_called_once_with("узлы", 2, None)
+    assert draft(context).purpose == "search"
+    reply = update.message.reply_text.await_args.kwargs
+    assert reply["message_thread_id"] == 9
+    button = reply["reply_markup"].inline_keyboard[0][0]
+    assert button.url == "https://linkwarden.example.com/links/12"
+    assert button.callback_data is None
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_private_search_all_accessible_collections(update, context, workflow, search_transport):
+    context.args = ["knot", "fishing"]
+    await bot.search_chat(update, context)
+    search_transport.assert_called_once_with("knot fishing", None, None)
+
+
+@pytest.mark.asyncio
+async def test_unbound_group_search_does_not_read_account_history(update, context, workflow, search_transport):
+    group(update, user_id=200, thread=9)
+    context.args = ["knot"]
+    await bot.search_chat(update, context)
+    search_transport.assert_not_called()
+    assert "/bind" in update.message.reply_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_search_local_and_remote_pages_and_back(update, context, workflow, search_transport):
+    context.args = ["knot"]
+    search_transport.side_effect = [
+        (tuple(result_item(i) for i in range(1, 8)), 8),
+        ((result_item(8),), None),
+    ]
+    await bot.search_chat(update, context)
+    await press(update, context, "search_next")
+    assert draft(context).page == 1
+    assert search_transport.call_count == 1
+    await press(update, context, "search_next")
+    assert draft(context).search_batch == 1 and draft(context).page == 0
+    search_transport.assert_called_with("knot", None, 8)
+    await press(update, context, "search_prev")
+    assert draft(context).search_batch == 0 and draft(context).page == 1
+    await press(update, context, "search_prev")
+    assert draft(context).page == 0 and search_transport.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_search_error_retry_and_empty_results(update, context, workflow, search_transport):
+    context.args = ["knot"]
+    search_transport.side_effect = [ApiError("HTTP 503"), ((), None)]
+    await bot.search_chat(update, context)
+    assert "HTTP 503" in update.message.reply_text.await_args.kwargs["text"]
+    await press(update, context, "search_refresh")
+    assert "совпадений нет" in update.callback_query.edit_message_text.await_args.kwargs["text"]
+    assert draft(context).error == ""
+
+
+@pytest.mark.asyncio
+async def test_search_next_failure_keeps_current_page_for_retry(update, context, workflow, search_transport):
+    context.args = ["knot"]
+    search_transport.side_effect = [((result_item(1),), 2), ApiError("HTTP 503"), ((result_item(2),), None)]
+    await bot.search_chat(update, context)
+    await press(update, context, "search_next")
+    assert draft(context).error and draft(context).search_batch == 0
+    await press(update, context, "search_next")
+    assert not draft(context).error and draft(context).search_batch == 1
+
+
+@pytest.mark.asyncio
+async def test_search_resets_on_binding_change_before_cached_navigation(update, context, workflow, search_transport):
+    from submissions import set_binding
+    group(update, user_id=200, thread=9)
+    set_binding(-1001872870761, 9, 2)
+    context.args = ["knot"]
+    search_transport.return_value = (tuple(result_item(i) for i in range(1, 8)), None)
+    await bot.search_chat(update, context)
+    data = data_for(context, "search_next")
+    set_binding(-1001872870761, 9, 1)
+    await press(update, context, data=data)
+    assert not context.bot_data["selection_sessions"]
+    assert "изменилась" in update.callback_query.edit_message_text.await_args.args[0]
+    assert search_transport.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_search_callbacks_only_for_original_requester(update, context, workflow, search_transport):
+    from submissions import set_binding
+    group(update, user_id=200, thread=9)
+    set_binding(-1001872870761, 9, 2)
+    context.args = ["knot"]
+    await bot.search_chat(update, context)
+    data = data_for(context, "search_refresh")
+    for intruder in (201, 100):
+        update.effective_user.id = intruder
+        await press(update, context, data=data)
+    assert search_transport.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_search_validation_authorization_and_expiry(update, context, workflow, search_transport):
+    context.args = []
+    await bot.search_chat(update, context)
+    context.args = ["x" * 201]
+    await bot.search_chat(update, context)
+    search_transport.assert_not_called()
+    context.args = ["knot"]
+    update.effective_user.id = 999
+    await bot.search_chat(update, context)
+    search_transport.assert_not_called()
+    update.effective_user.id = 100
+    await bot.search_chat(update, context)
+    data = data_for(context, "search_refresh")
+    draft(context).created -= SESSION_TTL + 1
+    await press(update, context, data=data)
+    assert search_transport.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_search_handles_sparse_pages_and_repeated_cursor(update, context, workflow, search_transport):
+    context.args = ["knot"]
+    search_transport.side_effect = [((), 50), ((), 100), ((result_item(1),), 50)]
+    await bot.search_chat(update, context)
+    await press(update, context, "search_next")
+    await press(update, context, "search_next")
+    await press(update, context, "search_next")
+    assert "Повтор страницы" in draft(context).error
+    assert search_transport.call_count == 3
+
+@pytest.mark.asyncio
+async def test_search_message_fits_telegram_with_long_unicode_metadata(update, context, workflow, search_transport):
+    context.args = ["🐟" * 200]
+    search_transport.return_value = (tuple({
+        "id": i, "name": "🐟" * 500, "collection": "🐟" * 500,
+        "tags": ("🐟" * 500,) * 50,
+    } for i in range(1, 6)), None)
+    await bot.search_chat(update, context)
+    text = update.message.reply_text.await_args.kwargs["text"]
+    assert len(text.encode("utf-16-le")) // 2 <= 4096

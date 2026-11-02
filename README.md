@@ -94,6 +94,12 @@ Sessions expire after one hour or a bot restart. Stale, forged, wrong-message, a
 
 Collections are read from response on GET /api/v1/collections. Tags are read from data.tags on GET /api/v1/tags, following data.nextCursor with the cursor parameter. Save sends collection: {id} and tags: [{id, name}], then validates response.id. Linkwarden performs native screenshot preservation according to its archive preferences.
 
+Use /search text to find saved links by name, address, description, or tags through the installed Linkwarden search API. Queries are limited to 200 characters. In the authorized group, a topic must have a collection binding and results are restricted to that collection. Group members can search, but only the query author can navigate its menu. In the owner's private chat, search covers all collections visible to the API account.
+
+Results are shown five at a time with Open in Linkwarden buttons, previous and next pages, refresh, and close. API cursors are used for server pagination, including sparse Meilisearch pages. Previous pages use the session cache. Failed page requests can be retried without discarding the current results. Sessions expire after one hour or a restart.
+
+Every navigation callback rechecks authorization, author, chat, message, topic, and the current topic binding. If the binding changes or is removed, the menu requires a new query. Returned collection IDs are also checked locally before group results are displayed. Searches never create or change links.
+
 After an individual Save, the result includes the current collection, tags, and an Open in Linkwarden button pointing to /links/ID. Existing duplicate links display their own metadata. If metadata cannot be read after a successful creation, the confirmed selection is shown and the save remains successful. Failed or uncertain saves do not show a success button.
 
 LINKWARDEN_PUBLIC_URL optionally sets a browser-facing base address. It defaults to LINKWARDEN_API_URL. Use the address reachable from the user's browser when the API address is internal to Docker. URL credentials, query parameters, fragments, and invalid addresses are rejected for buttons. The API token is never included in the button, and the Linkwarden web login still controls access.

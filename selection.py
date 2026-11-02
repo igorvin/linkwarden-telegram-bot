@@ -5,9 +5,11 @@ import secrets
 import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from linkwarden import public_link_url
 
 PAGE_SIZE = 8
 SESSION_TTL = 3600
+SEARCH_PAGE_SIZE = 5
 
 
 def parse_topic_collections(value):
@@ -32,6 +34,9 @@ class Draft:
     message_id: int | None = None
     bound_collection: int | None = None
     purpose: str = "save"
+    search_query: str = ""
+    search_pages: tuple = ()
+    search_batch: int = 0
     defaults_loaded: bool = False
     settings_summary: str = ""
     urls: tuple = ()
@@ -60,6 +65,41 @@ class Draft:
             return InlineKeyboardButton(
                 label, callback_data=f"lw:{self.session_id}:{self.revision}:{token}"
             )
+
+        if self.purpose == "search":
+            text = f"Поиск: {self.search_query}\n"
+            text += f"Коллекция темы: #{self.collection}" if self.collection is not None else "Все доступные коллекции"
+            if self.error:
+                text += "\n" + self.error
+            if self.search_pages:
+                batch = self.search_pages[self.search_batch]
+                start = self.page * SEARCH_PAGE_SIZE
+                visible = batch["items"][start:start + SEARCH_PAGE_SIZE]
+                if not visible:
+                    text += "\nНа этой странице совпадений нет."
+                preceding = sum(len(page["items"]) for page in self.search_pages[:self.search_batch])
+                for number, item in enumerate(visible, preceding + start + 1):
+                    title = item["name"].replace("\n", " ").replace("\r", " ")[:100]
+                    collection = item["collection"].replace("\n", " ").replace("\r", " ")[:60]
+                    text += f"\n\n{number}. {title}\nКоллекция: {collection}"
+                    if item["tags"]:
+                        tags = ", ".join(name.replace("\n", " ")[:35] for name in item["tags"][:3])
+                        text += "\nТеги: " + tags
+                        if len(item["tags"]) > 3:
+                            text += f" и ещё {len(item['tags']) - 3}"
+                    url = public_link_url(item["id"])
+                    if url:
+                        rows.append([InlineKeyboardButton(f"{number}. {title[:45]}", url=url)])
+                nav = []
+                if self.page or self.search_batch:
+                    nav.append(button("←", "search_prev"))
+                if start + SEARCH_PAGE_SIZE < len(batch["items"]) or batch["next_cursor"] is not None:
+                    nav.append(button("→", "search_next"))
+                if nav:
+                    rows.append(nav)
+            rows.append([button("Обновить поиск", "search_refresh"), button("Закрыть", "cancel")])
+            return {"text": text, "reply_markup": InlineKeyboardMarkup(rows),
+                    "disable_web_page_preview": True}
 
         if self.purpose == "settings":
             rows = [[button("Выбрать коллекцию", "settings_bind")]]
