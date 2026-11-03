@@ -188,3 +188,32 @@ def search_links(query, collection_id=None, cursor=None):
             "collection": row["collection"]["name"], "tags": tuple(tags.values()),
         })
     return tuple(results), next_cursor
+
+
+def get_preservation_status(link_id):
+    link = request("GET", f"links/{link_id}").get("response")
+    fields = (("image", "Скриншот"), ("preview", "Превью"), ("pdf", "PDF"),
+              ("monolith", "HTML-копия"), ("readable", "Текст статьи"))
+    if (not isinstance(link, dict) or type(link.get("id")) is not int or link["id"] != link_id
+            or any(key not in link for key, _ in fields) or "lastPreserved" not in link):
+        raise ApiError("Не удалось прочитать статус архивации.")
+    completed = link["lastPreserved"]
+    if completed is not None and not isinstance(completed, str):
+        raise ApiError("Некорректный статус обработки Linkwarden.")
+    pending = False
+    lines = []
+    for key, label in fields:
+        value = link[key]
+        if value is not None and not isinstance(value, str):
+            raise ApiError("Некорректный статус сохранённого формата.")
+        if isinstance(value, str) and value.startswith("archives/"):
+            status = "✅ файл доступен"
+        elif value == "unavailable" or (not value and completed):
+            status = "— недоступно"
+        elif not value:
+            status = "⏳ ожидается"
+            pending = True
+        else:
+            status = "❔ неизвестно"
+        lines.append(f"{label}: {status}")
+    return tuple(lines), pending

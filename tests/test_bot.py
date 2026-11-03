@@ -55,6 +55,12 @@ def context():
 
 
 @pytest.fixture(autouse=True)
+def preservation_transport():
+    with patch("bot.get_preservation_status", return_value=(("Скриншот: ✅ готов",), False)):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def metadata_transport():
     with patch("bot.get_link_metadata", side_effect=ApiError("metadata unavailable")):
         yield
@@ -70,7 +76,7 @@ def workflow():
 
 
 def draft(context):
-    return next(iter(context.bot_data["selection_sessions"].values()))
+    return next(reversed(context.bot_data["selection_sessions"].values()))
 
 
 def data_for(context, action, value=None):
@@ -194,7 +200,7 @@ async def test_full_flow_preserves_topic(update, context, workflow, thread):
     assert "Fishing" in summary and "Bait" in summary and "Knots" not in summary
     await press(update, context, "save")
     save.assert_called_once_with("https://example.com", 2, {4: "Bait"})
-    assert not context.bot_data["selection_sessions"]
+    assert draft(context).purpose == "preservation"
 
 
 @pytest.mark.asyncio
@@ -1099,7 +1105,8 @@ async def test_invalid_public_url_keeps_success_without_exposing_secret(update, 
     await press(update, context, "done")
     await press(update, context, "save")
     reply = update.callback_query.edit_message_text.await_args.kwargs
-    assert "сохранена" in reply["text"] and "reply_markup" not in reply
+    assert "сохранена" in reply["text"]
+    assert all(button.url is None for row in reply["reply_markup"].inline_keyboard for button in row)
     assert "secret" not in str(reply)
 
 
@@ -1258,3 +1265,121 @@ async def test_search_message_fits_telegram_with_long_unicode_metadata(update, c
     await bot.search_chat(update, context)
     text = update.message.reply_text.await_args.kwargs["text"]
     assert len(text.encode("utf-16-le")) // 2 <= 4096
+
+@pytest.mark.asyncio
+async def test_save_adds_owner_bound_preservation_refresh(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "done")
+    await press(update, context, "save")
+    assert draft(context).purpose == "preservation"
+    data = data_for(context, "preservation_refresh")
+    update.effective_user.id = 201
+    with patch("bot.get_preservation_status") as status:
+        await press(update, context, data=data)
+        status.assert_not_called()
+    update.effective_user.id = 100
+    with patch("bot.get_preservation_status", return_value=(("PDF: ✅ готов",), False)):
+        await press(update, context, data=data)
+    assert "PDF: ✅ готов" in update.callback_query.edit_message_text.await_args.kwargs["text"]
+    workflow[2].assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_pending_new_link_starts_bounded_watcher(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "done")
+    with patch("bot.get_preservation_status", return_value=(("Скриншот: ⏳ ожидается",), True)), patch("bot.start_preservation_watch") as start:
+        await press(update, context, "save")
+        start.assert_called_once()
+    assert draft(context).preservation_pending
+
+
+@pytest.mark.asyncio
+async def test_preservation_api_error_does_not_undo_success(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "done")
+    with patch("bot.get_preservation_status", side_effect=ApiError("Статус временно недоступен")), patch("bot.start_preservation_watch"):
+        await press(update, context, "save")
+    reply = update.callback_query.edit_message_text.await_args.kwargs
+    assert "сохранена" in reply["text"] and "временно недоступен" in reply["text"]
+    assert draft(context).purpose == "preservation"
+    workflow[2].assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_watcher_updates_once_when_ready(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "done")
+    with patch("bot.get_preservation_status", return_value=(("Скриншот: ⏳ ожидается",), True)), patch("bot.start_preservation_watch"):
+        await press(update, context, "save")
+    session_id = draft(context).session_id
+    context.bot.edit_message_text = AsyncMock()
+    with patch("bot.get_preservation_status", return_value=(("Скриншот: ✅ готов",), False)) as status, patch("bot.asyncio.sleep", new_callable=AsyncMock):
+        await bot.watch_preservation(session_id, context)
+    status.assert_called_once_with(91)
+    context.bot.edit_message_text.assert_awaited_once()
+    assert context.bot.edit_message_text.await_args.kwargs["message_id"] == 55
+    assert draft(context).preservation_pending is False
+    workflow[2].assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_watcher_limit_and_no_repeated_identical_edits(update, context, workflow, monkeypatch):
+    pending = (("Скриншот: ⏳ ожидается",), True)
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "done")
+    with patch("bot.get_preservation_status", return_value=pending), patch("bot.start_preservation_watch"):
+        await press(update, context, "save")
+    context.bot.edit_message_text = AsyncMock()
+    monkeypatch.setattr(bot, "PRESERVATION_MAX_POLLS", 2)
+    with patch("bot.get_preservation_status", return_value=pending) as status, patch("bot.asyncio.sleep", new_callable=AsyncMock):
+        await bot.watch_preservation(draft(context).session_id, context)
+    assert status.call_count == 2
+    context.bot.edit_message_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_watcher_skips_busy_session_and_exits_if_expired(update, context, workflow, monkeypatch):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "done")
+    with patch("bot.get_preservation_status", return_value=(("pending",), True)), patch("bot.start_preservation_watch"):
+        await press(update, context, "save")
+    session = draft(context)
+    session.busy = True
+    monkeypatch.setattr(bot, "PRESERVATION_MAX_POLLS", 2)
+    with patch("bot.get_preservation_status") as status, patch("bot.asyncio.sleep", new_callable=AsyncMock):
+        await bot.watch_preservation(session.session_id, context)
+        status.assert_not_called()
+        session.busy = False
+        session.created -= SESSION_TTL + 1
+        await bot.watch_preservation(session.session_id, context)
+        status.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_preservation_watcher_capacity(update, context, workflow):
+    await bot.handle_message(update, context)
+    session = draft(context)
+    context.bot_data["preservation_tasks"] = {str(i): object() for i in range(bot.MAX_PRESERVATION_WATCHERS)}
+    bot.start_preservation_watch(session, context)
+    context.application.create_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_preservation_manual_refresh_checks_topic(update, context, workflow):
+    group(update, thread=9)
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "done")
+    await press(update, context, "save")
+    data = data_for(context, "preservation_refresh")
+    update.callback_query.message.message_thread_id = 42
+    with patch("bot.get_preservation_status") as status:
+        await press(update, context, data=data)
+        status.assert_not_called()

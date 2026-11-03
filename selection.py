@@ -34,6 +34,10 @@ class Draft:
     message_id: int | None = None
     bound_collection: int | None = None
     purpose: str = "save"
+    preservation_link_id: int | None = None
+    preservation_text: str = ""
+    preservation_lines: tuple = ()
+    preservation_pending: bool = False
     search_query: str = ""
     search_pages: tuple = ()
     search_batch: int = 0
@@ -65,6 +69,16 @@ class Draft:
             return InlineKeyboardButton(
                 label, callback_data=f"lw:{self.session_id}:{self.revision}:{token}"
             )
+
+        if self.purpose == "preservation":
+            text = self.preservation_text + "\n\nАрхивы Linkwarden\n"
+            text += self.error if self.error else "\n".join(self.preservation_lines)
+            url = public_link_url(self.preservation_link_id)
+            if url:
+                rows.append([InlineKeyboardButton("Открыть в Linkwarden", url=url)])
+            rows.append([button("Обновить статус", "preservation_refresh")])
+            return {"text": text, "reply_markup": InlineKeyboardMarkup(rows),
+                    "disable_web_page_preview": True}
 
         if self.purpose == "search":
             text = f"Поиск: {self.search_query}\n"

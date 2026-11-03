@@ -6,7 +6,7 @@ import sys
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, CallbackContext
 from telegram.error import Conflict, TelegramError, TimedOut, NetworkError
-from linkwarden import ApiError, get_collections, get_tags, get_link_metadata, public_link_url, search_links
+from linkwarden import ApiError, get_collections, get_tags, get_link_metadata, public_link_url, search_links, get_preservation_status
 from submissions import save_once, get_binding, set_binding, get_default_tags, set_default_tags
 from scan_export import ExportError, MAX_EXPORT_BYTES, parse_export
 from scan_jobs import ScanStore, progress_text
@@ -76,6 +76,10 @@ def is_authorized(update: Update) -> bool:
 if not all([TELEGRAM_TOKEN, LINKWARDEN_API_URL, LINKWARDEN_API_KEY]):
     logger.error("Missing required environment variables: TELEGRAM_TOKEN, LINKWARDEN_API_URL, LINKWARDEN_API_KEY")
     sys.exit(1)
+
+PRESERVATION_POLL_INTERVAL = 10
+PRESERVATION_MAX_POLLS = 12
+MAX_PRESERVATION_WATCHERS = 10
 
 # Rate limiting: max 10 messages per user per minute
 RATE_LIMIT_THRESHOLD = int(os.environ.get('RATE_LIMIT_THRESHOLD', 10))
@@ -590,6 +594,61 @@ async def run_scan(job_id, context):
 
 
 
+
+async def load_preservation(draft):
+    try:
+        lines, pending = await asyncio.to_thread(get_preservation_status, draft.preservation_link_id)
+        draft.preservation_lines = lines
+        draft.preservation_pending = pending
+        draft.error = ""
+    except ApiError as error:
+        draft.error = str(error)
+
+
+def start_preservation_watch(draft, context):
+    tasks = context.bot_data.setdefault("preservation_tasks", {})
+    if len(tasks) >= MAX_PRESERVATION_WATCHERS or draft.session_id in tasks:
+        return
+    tasks[draft.session_id] = context.application.create_task(watch_preservation(draft.session_id, context))
+
+
+async def watch_preservation(session_id, context):
+    try:
+        for _ in range(PRESERVATION_MAX_POLLS):
+            await asyncio.sleep(PRESERVATION_POLL_INTERVAL)
+            sessions = active_sessions(context)
+            draft = sessions.get(session_id)
+            if draft is None or draft.purpose != "preservation":
+                return
+            if draft.busy:
+                continue
+            if not draft.preservation_pending and not draft.error:
+                return
+            draft.busy = True
+            try:
+                changed = replace(draft, actions={}, busy=False)
+                await load_preservation(changed)
+                before = (draft.preservation_lines, draft.preservation_pending, draft.error)
+                after = (changed.preservation_lines, changed.preservation_pending, changed.error)
+                if before != after:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=draft.chat_id, message_id=draft.message_id, **changed.view()
+                        )
+                    except TelegramError:
+                        logger.warning("Could not update preservation status")
+                        return
+                    sessions[session_id] = changed
+            finally:
+                draft.busy = False
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("Preservation watcher stopped")
+    finally:
+        context.bot_data.get("preservation_tasks", {}).pop(session_id, None)
+
+
 async def saved_link_reply(link_id, created, draft):
     text = (f"Ссылка сохранена в Linkwarden (#{link_id})." if created else
             f"Ссылка уже есть в Linkwarden (#{link_id}).")
@@ -655,7 +714,7 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
         await answer_callback(query, "Действие уже выполняется.")
         return
 
-    if draft.purpose == "search" and not check_rate_limit(update.effective_user.id):
+    if draft.purpose in ("search", "preservation") and not check_rate_limit(update.effective_user.id):
         await answer_callback(query, "Слишком много запросов. Повторите позже.")
         return
     draft.busy = True
@@ -665,6 +724,12 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
         if operation == "cancel":
             del sessions[draft.session_id]
             await query.edit_message_text("Отменено.")
+            return
+        if operation == "preservation_refresh":
+            changed = replace(draft, actions={}, busy=False)
+            await load_preservation(changed)
+            await query.edit_message_text(**changed.view())
+            sessions[draft.session_id] = changed
             return
         if operation in ("search_prev", "search_next", "search_refresh"):
             if draft.chat_id == ALLOWED_TELEGRAM_GROUP_ID:
@@ -790,17 +855,29 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
             return
         if operation == "save":
             del sessions[draft.session_id]
+            status_draft = None
             try:
                 link_id, created = await asyncio.to_thread(
                     save_once, draft.url, draft.collection, draft.chosen
                 )
                 reply = await saved_link_reply(link_id, created, draft)
+                status_draft = replace(
+                    draft, purpose="preservation", actions={}, busy=False,
+                    created=time.monotonic(), preservation_link_id=link_id,
+                    preservation_text=reply["text"], error=""
+                )
+                await load_preservation(status_draft)
+                reply = status_draft.view()
             except ApiError as error:
                 text = str(error)
                 if error.outcome_unknown:
                     text += " Результат сохранения неизвестен. Проверьте Linkwarden."
                 reply = {"text": text}
             await query.edit_message_text(**reply)
+            if status_draft is not None:
+                sessions[draft.session_id] = status_draft
+                if created and (status_draft.preservation_pending or status_draft.error):
+                    start_preservation_watch(status_draft, context)
             return
 
         changed = replace(draft, chosen=draft.chosen.copy(), actions={}, busy=False)

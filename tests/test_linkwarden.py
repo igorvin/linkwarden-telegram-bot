@@ -233,3 +233,68 @@ def test_search_empty_intermediate_page_retains_cursor(transport):
     from linkwarden import search_links
     transport.return_value = response({"success": True, "data": {"links": [], "nextCursor": 100}})
     assert search_links("knot", 2, 50) == ((), 100)
+
+
+def preserved_link(**updates):
+    result = {"id": 12, "image": None, "preview": None, "pdf": None,
+              "monolith": None, "readable": None, "lastPreserved": None}
+    result.update(updates)
+    return result
+
+
+def test_preservation_waiting_and_completed_formats(transport):
+    from linkwarden import get_preservation_status
+    transport.return_value = response({"response": preserved_link(
+        image="archives/1/12.jpeg", preview="archives/preview/1/12.jpeg",
+        pdf="unavailable"
+    )})
+    lines, pending = get_preservation_status(12)
+    assert pending
+    assert "Скриншот: ✅ файл доступен" in lines and "PDF: — недоступно" in lines
+    assert "HTML-копия: ⏳ ожидается" in lines
+    assert "archives/" not in str(lines)
+
+
+def test_preservation_finished_attempt_is_not_assumed_success(transport):
+    from linkwarden import get_preservation_status
+    transport.return_value = response({"response": preserved_link(
+        lastPreserved="2026-11-03T10:00:00.000Z",
+        image="unavailable", readable="unavailable"
+    )})
+    lines, pending = get_preservation_status(12)
+    assert not pending
+    assert all("недоступно" in line for line in lines)
+    assert not any("ошибка" in line.lower() for line in lines)
+
+
+def test_preservation_ready_paths_do_not_validate_image_quality(transport):
+    from linkwarden import get_preservation_status
+    transport.return_value = response({"response": preserved_link(
+        image="archives/1/12.jpeg", preview="archives/preview/1/12.jpeg",
+        pdf="archives/1/12.pdf", monolith="archives/1/12.html", readable="archives/1/12.json",
+        lastPreserved="2026-11-03T10:00:00.000Z"
+    )})
+    lines, pending = get_preservation_status(12)
+    assert not pending and all("файл доступен" in line for line in lines)
+
+
+@pytest.mark.parametrize("row", [
+    {"id": 12}, preserved_link(id=13), preserved_link(id=True),
+    preserved_link(image=True), preserved_link(lastPreserved=42),
+])
+def test_preservation_bad_response(transport, row):
+    from linkwarden import get_preservation_status
+    transport.return_value = response({"response": row})
+    with pytest.raises(ApiError):
+        get_preservation_status(12)
+
+
+def test_preservation_unknown_value_not_exposed(transport):
+    from linkwarden import get_preservation_status
+    transport.return_value = response({"response": preserved_link(
+        image="/private/path/secret", lastPreserved="finished"
+    )})
+    lines, pending = get_preservation_status(12)
+    assert not pending
+    assert "неизвестно" in lines[0]
+    assert "secret" not in str(lines)
