@@ -1557,6 +1557,7 @@ async def test_creation_prompt_expiry_does_not_create(update, context, workflow)
     with patch("bot.create_named_item") as create:
         assert await bot.handle_creation_reply(update, context)
         create.assert_not_called()
+    context.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=66)
     assert "истекла" in update.message.reply_text.await_args.args[0]
 
 
@@ -1683,3 +1684,15 @@ async def test_prompt_cleanup_failure_does_not_prevent_tag_selection(update, con
         assert await bot.handle_creation_reply(update, context)
     assert draft(context).chosen == {9: "New"}
     assert draft(context).stage == "tags"
+
+
+@pytest.mark.asyncio
+async def test_selecting_existing_tag_never_sends_creation_prompt(update, context, workflow):
+    group(update, user_id=100, thread=9)
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    context.bot.send_message.reset_mock()
+    await press(update, context, "pick", 3)
+    assert draft(context).chosen == {3: "Knots"}
+    assert not draft(context).creation_kind
+    context.bot.send_message.assert_not_awaited()

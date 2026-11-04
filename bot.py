@@ -629,6 +629,10 @@ async def handle_creation_reply(update: Update, context: CallbackContext) -> boo
         if (reply.from_user is not None and reply.from_user.id == context.bot.id
                 and isinstance(reply.text, str)
                 and reply.text.startswith(("Введите название нового тега", "Введите название новой коллекции"))):
+            try:
+                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=reply.message_id)
+            except TelegramError:
+                logger.warning("Could not remove the expired creation prompt")
             await send_message_with_retry(update, context, "Сессия ввода истекла. Откройте выбор и повторите создание.")
             return True
         return False
