@@ -114,7 +114,7 @@ async def start(update: Update, context: CallbackContext) -> None:
         return
     await send_message_with_retry(
         update, context,
-        "Пришлите URL, выберите коллекцию и теги, затем подтвердите сохранение."
+        "Пришлите URL, выберите коллекцию и теги. Кнопка «Готово — сохранить» сохранит ссылку."
     )
 
 
@@ -346,7 +346,7 @@ async def load_tags(draft):
             draft.defaults_loaded = True
         draft.chosen = {key: name for key, name in draft.tags.items() if key in draft.chosen}
         draft.error = ""
-        if not draft.tags and draft.purpose != "default_tags":
+        if not draft.tags and draft.purpose == "scan":
             draft.stage = "confirm"
     except ApiError as error:
         draft.error = str(error)
@@ -721,6 +721,8 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
     try:
         await answer_callback(query)
         operation, value = action
+        if operation == "done" and draft.purpose == "save":
+            operation = "save"
         if operation == "cancel":
             del sessions[draft.session_id]
             await query.edit_message_text("Отменено.")
@@ -844,7 +846,7 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
             del sessions[draft.session_id]
             await query.edit_message_text(
                 f"Привязка сохранена: {collections[draft.collection][:200]} (#{draft.collection}). "
-                "Для новых URL останутся выбор тегов и подтверждение."
+                "Для новых URL останется выбор тегов с сохранением по кнопке «Готово — сохранить»."
             )
             return
         if operation == "save" and draft.purpose == "scan":

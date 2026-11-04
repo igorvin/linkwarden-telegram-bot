@@ -198,9 +198,9 @@ async def test_full_flow_preserves_topic(update, context, workflow, thread):
     await press(update, context, "done")
     summary = update.callback_query.edit_message_text.await_args.kwargs["text"]
     assert "Fishing" in summary and "Bait" in summary and "Knots" not in summary
-    await press(update, context, "save")
     save.assert_called_once_with("https://example.com", 2, {4: "Bait"})
     assert draft(context).purpose == "preservation"
+
 
 
 @pytest.mark.asyncio
@@ -208,23 +208,23 @@ async def test_private_flow_and_zero_tags(update, context, workflow):
     workflow[1].return_value = {}
     await bot.handle_message(update, context)
     await press(update, context, "pick", 1)
-    assert draft(context).stage == "confirm"
-    await press(update, context, "save")
+    assert draft(context).stage == "tags"
+    workflow[2].assert_not_called()
+    await press(update, context, "done")
     workflow[2].assert_called_once_with("https://example.com", 1, {})
 
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["collections", "tags", "confirm"])
+@pytest.mark.parametrize("stage", ["collections", "tags", "done_button"])
 @pytest.mark.parametrize("intruder", [201, 100])
 async def test_other_member_including_owner_cannot_use_buttons(update, context, workflow, stage, intruder):
     group(update)
     await bot.handle_message(update, context)
     if stage != "collections":
         await press(update, context, "pick", 1)
-    if stage == "confirm":
-        await press(update, context, "done")
     session = draft(context)
-    action = {"collections": ("pick", 1), "tags": ("pick", 3), "confirm": ("save", None)}[stage]
+    action = {"collections": ("pick", 1), "tags": ("pick", 3), "done_button": ("done", None)}[stage]
     data = data_for(context, *action)
     workflow[0].reset_mock()
     workflow[1].reset_mock()
@@ -266,15 +266,14 @@ async def test_back_retains_tags_and_changes_collection(update, context, workflo
     await bot.handle_message(update, context)
     await press(update, context, "pick", 1)
     await press(update, context, "pick", 3)
-    await press(update, context, "done")
-    await press(update, context, "back")
-    assert draft(context).chosen == {3: "Knots"}
     await press(update, context, "back")
     assert draft(context).stage == "collections"
     await press(update, context, "pick", 2)
+    assert draft(context).chosen == {3: "Knots"}
+    workflow[2].assert_not_called()
     await press(update, context, "done")
-    await press(update, context, "save")
     workflow[2].assert_called_once_with("https://example.com", 2, {3: "Knots"})
+
 
 
 @pytest.mark.asyncio
@@ -302,10 +301,11 @@ async def test_api_failures_and_empty_collections(update, context, workflow):
     await press(update, context, "pick", 1)
     assert draft(context).error == "HTTP 401"
     await press(update, context, "retry")
-    assert draft(context).stage == "confirm"
+    assert draft(context).stage == "tags"
     workflow[2].side_effect = ApiError("Неизвестный результат", outcome_unknown=True)
-    await press(update, context, "save")
+    await press(update, context, "done")
     assert "неизвестен" in update.callback_query.edit_message_text.await_args.kwargs["text"]
+
 
 
 @pytest.mark.asyncio
@@ -322,8 +322,7 @@ async def test_repeated_url_and_update_only_create_one_session(update, context, 
 async def test_repeated_save_is_claimed_before_network_await(update, context, workflow):
     await bot.handle_message(update, context)
     await press(update, context, "pick", 1)
-    await press(update, context, "done")
-    data = data_for(context, "save")
+    data = data_for(context, "done")
     await asyncio.gather(press(update, context, data=data), press(update, context, data=data))
     workflow[2].assert_called_once()
 
@@ -413,9 +412,8 @@ async def test_group_flow_uses_real_api_client_and_persistent_dedup(update, cont
         await bot.handle_message(update, context)
         await press(update, context, "pick", 8)
         await press(update, context, "pick", 9)
-        await press(update, context, "done")
         request.assert_not_called()
-        await press(update, context, "save")
+        await press(update, context, "done")
         assert request.call_args.kwargs["json"] == {
             "url": "https://example.com", "collection": {"id": 8},
             "tags": [{"id": 9, "name": "Knots"}],
@@ -425,9 +423,9 @@ async def test_group_flow_uses_real_api_client_and_persistent_dedup(update, cont
         await bot.handle_message(update, context)
         await press(update, context, "pick", 8)
         await press(update, context, "done")
-        await press(update, context, "save")
         assert request.call_count == 2
         assert "уже есть" in update.callback_query.edit_message_text.await_args.kwargs["text"]
+
 
 
 @pytest.mark.asyncio
@@ -487,17 +485,14 @@ async def test_bound_topic_skips_collection_and_locks_back(update, context, work
     await bot.handle_message(update, context)
     session = draft(context)
     assert session.collection == 2 and session.stage == "tags"
-    assert not any(action == ("back", None) for action in session.actions.values())
+    assert ("back", None) not in session.actions.values()
     assert "Fishing" in update.message.reply_text.await_args.kwargs["text"]
     assert update.message.reply_text.await_args.kwargs["message_thread_id"] == 9
     await press(update, context, "pick", 3)
+    workflow[2].assert_not_called()
     await press(update, context, "done")
-    await press(update, context, "back")
-    assert draft(context).stage == "tags" and draft(context).chosen == {3: "Knots"}
-    assert not any(action == ("back", None) for action in draft(context).actions.values())
-    await press(update, context, "done")
-    await press(update, context, "save")
     workflow[2].assert_called_once_with("https://example.com", 2, {3: "Knots"})
+
 
 
 @pytest.mark.asyncio
@@ -539,9 +534,11 @@ async def test_bound_fetch_errors_and_empty_tags(update, context, workflow, monk
     assert draft(context).stage == "tags" and draft(context).error == "HTTP 401"
     assert all(action != "back" for action, _ in draft(context).actions.values())
     await press(update, context, "retry")
-    assert draft(context).stage == "confirm"
-    await press(update, context, "save")
+    assert draft(context).stage == "tags"
+    workflow[2].assert_not_called()
+    await press(update, context, "done")
     workflow[2].assert_called_once_with("https://example.com", 2, {})
+
 
 
 @pytest.mark.asyncio
@@ -923,12 +920,10 @@ async def test_settings_tags_confirm_then_preselect_for_any_member(update, conte
     await bot.handle_message(update, context)
     assert draft(context).chosen == {3: "Knots"}
     await press(update, context, "pick", 3)
+    assert draft(context).chosen == {}
     await press(update, context, "done")
-    await press(update, context, "back")
-    assert draft(context).chosen == {}  # Back must not reapply deselected defaults.
-    await press(update, context, "done")
-    await press(update, context, "save")
     workflow[2].assert_called_once_with("https://example.com", 2, {})
+
 
 
 @pytest.mark.asyncio
@@ -1037,9 +1032,8 @@ async def test_saved_message_has_open_button_and_actual_metadata(update, context
     await bot.handle_message(update, context)
     await press(update, context, "pick", 2)
     await press(update, context, "pick", 3)
-    await press(update, context, "done")
     with patch("bot.get_link_metadata", return_value=("Actual collection", ("Actual tag",))):
-        await press(update, context, "save")
+        await press(update, context, "done")
     reply = update.callback_query.edit_message_text.await_args.kwargs
     assert "Actual collection" in reply["text"] and "Actual tag" in reply["text"]
     button = reply["reply_markup"].inline_keyboard[0][0]
@@ -1048,18 +1042,19 @@ async def test_saved_message_has_open_button_and_actual_metadata(update, context
     assert button.callback_data is None
 
 
+
 @pytest.mark.asyncio
 async def test_duplicate_result_does_not_claim_requested_metadata(update, context, workflow):
     workflow[2].return_value = (91, False)
     await bot.handle_message(update, context)
     await press(update, context, "pick", 2)
     await press(update, context, "pick", 3)
-    await press(update, context, "done")
     with patch("bot.get_link_metadata", return_value=("Original", ("Old tag",))):
-        await press(update, context, "save")
+        await press(update, context, "done")
     reply = update.callback_query.edit_message_text.await_args.kwargs
     assert "уже есть" in reply["text"] and "Original" in reply["text"]
     assert "Fishing" not in reply["text"] and "Knots" not in reply["text"]
+
 
 
 @pytest.mark.asyncio
@@ -1068,11 +1063,11 @@ async def test_metadata_failure_after_post_preserves_success(update, context, wo
     await press(update, context, "pick", 2)
     await press(update, context, "pick", 3)
     await press(update, context, "done")
-    await press(update, context, "save")
     reply = update.callback_query.edit_message_text.await_args.kwargs
     assert "сохранена" in reply["text"] and "Fishing" in reply["text"] and "Knots" in reply["text"]
     assert "reply_markup" in reply
     workflow[2].assert_called_once()
+
 
 
 @pytest.mark.asyncio
@@ -1081,9 +1076,9 @@ async def test_duplicate_metadata_failure_does_not_show_proposed_selection(updat
     await bot.handle_message(update, context)
     await press(update, context, "pick", 2)
     await press(update, context, "done")
-    await press(update, context, "save")
     text = update.callback_query.edit_message_text.await_args.kwargs["text"]
     assert "временно недоступны" in text and "Fishing" not in text
+
 
 
 @pytest.mark.asyncio
@@ -1092,9 +1087,9 @@ async def test_failed_save_never_shows_success_button(update, context, workflow)
     await bot.handle_message(update, context)
     await press(update, context, "pick", 2)
     await press(update, context, "done")
-    await press(update, context, "save")
     reply = update.callback_query.edit_message_text.await_args.kwargs
     assert "неизвестен" in reply["text"] and "reply_markup" not in reply
+
 
 
 @pytest.mark.asyncio
@@ -1103,11 +1098,11 @@ async def test_invalid_public_url_keeps_success_without_exposing_secret(update, 
     await bot.handle_message(update, context)
     await press(update, context, "pick", 2)
     await press(update, context, "done")
-    await press(update, context, "save")
     reply = update.callback_query.edit_message_text.await_args.kwargs
     assert "сохранена" in reply["text"]
     assert all(button.url is None for row in reply["reply_markup"].inline_keyboard for button in row)
     assert "secret" not in str(reply)
+
 
 
 def result_item(link_id):
@@ -1271,7 +1266,6 @@ async def test_save_adds_owner_bound_preservation_refresh(update, context, workf
     await bot.handle_message(update, context)
     await press(update, context, "pick", 2)
     await press(update, context, "done")
-    await press(update, context, "save")
     assert draft(context).purpose == "preservation"
     data = data_for(context, "preservation_refresh")
     update.effective_user.id = 201
@@ -1285,37 +1279,37 @@ async def test_save_adds_owner_bound_preservation_refresh(update, context, workf
     workflow[2].assert_called_once()
 
 
+
 @pytest.mark.asyncio
 async def test_pending_new_link_starts_bounded_watcher(update, context, workflow):
     await bot.handle_message(update, context)
     await press(update, context, "pick", 2)
-    await press(update, context, "done")
     with patch("bot.get_preservation_status", return_value=(("Скриншот: ⏳ ожидается",), True)), patch("bot.start_preservation_watch") as start:
-        await press(update, context, "save")
+        await press(update, context, "done")
         start.assert_called_once()
     assert draft(context).preservation_pending
+
 
 
 @pytest.mark.asyncio
 async def test_preservation_api_error_does_not_undo_success(update, context, workflow):
     await bot.handle_message(update, context)
     await press(update, context, "pick", 2)
-    await press(update, context, "done")
     with patch("bot.get_preservation_status", side_effect=ApiError("Статус временно недоступен")), patch("bot.start_preservation_watch"):
-        await press(update, context, "save")
+        await press(update, context, "done")
     reply = update.callback_query.edit_message_text.await_args.kwargs
     assert "сохранена" in reply["text"] and "временно недоступен" in reply["text"]
     assert draft(context).purpose == "preservation"
     workflow[2].assert_called_once()
 
 
+
 @pytest.mark.asyncio
 async def test_watcher_updates_once_when_ready(update, context, workflow):
     await bot.handle_message(update, context)
     await press(update, context, "pick", 2)
-    await press(update, context, "done")
     with patch("bot.get_preservation_status", return_value=(("Скриншот: ⏳ ожидается",), True)), patch("bot.start_preservation_watch"):
-        await press(update, context, "save")
+        await press(update, context, "done")
     session_id = draft(context).session_id
     context.bot.edit_message_text = AsyncMock()
     with patch("bot.get_preservation_status", return_value=(("Скриншот: ✅ готов",), False)) as status, patch("bot.asyncio.sleep", new_callable=AsyncMock):
@@ -1327,14 +1321,14 @@ async def test_watcher_updates_once_when_ready(update, context, workflow):
     workflow[2].assert_called_once()
 
 
+
 @pytest.mark.asyncio
 async def test_watcher_limit_and_no_repeated_identical_edits(update, context, workflow, monkeypatch):
     pending = (("Скриншот: ⏳ ожидается",), True)
     await bot.handle_message(update, context)
     await press(update, context, "pick", 2)
-    await press(update, context, "done")
     with patch("bot.get_preservation_status", return_value=pending), patch("bot.start_preservation_watch"):
-        await press(update, context, "save")
+        await press(update, context, "done")
     context.bot.edit_message_text = AsyncMock()
     monkeypatch.setattr(bot, "PRESERVATION_MAX_POLLS", 2)
     with patch("bot.get_preservation_status", return_value=pending) as status, patch("bot.asyncio.sleep", new_callable=AsyncMock):
@@ -1343,13 +1337,13 @@ async def test_watcher_limit_and_no_repeated_identical_edits(update, context, wo
     context.bot.edit_message_text.assert_not_awaited()
 
 
+
 @pytest.mark.asyncio
 async def test_watcher_skips_busy_session_and_exits_if_expired(update, context, workflow, monkeypatch):
     await bot.handle_message(update, context)
     await press(update, context, "pick", 2)
-    await press(update, context, "done")
     with patch("bot.get_preservation_status", return_value=(("pending",), True)), patch("bot.start_preservation_watch"):
-        await press(update, context, "save")
+        await press(update, context, "done")
     session = draft(context)
     session.busy = True
     monkeypatch.setattr(bot, "PRESERVATION_MAX_POLLS", 2)
@@ -1360,6 +1354,7 @@ async def test_watcher_skips_busy_session_and_exits_if_expired(update, context, 
         session.created -= SESSION_TTL + 1
         await bot.watch_preservation(session.session_id, context)
         status.assert_not_called()
+
 
 
 @pytest.mark.asyncio
@@ -1377,9 +1372,38 @@ async def test_preservation_manual_refresh_checks_topic(update, context, workflo
     await bot.handle_message(update, context)
     await press(update, context, "pick", 2)
     await press(update, context, "done")
-    await press(update, context, "save")
     data = data_for(context, "preservation_refresh")
     update.callback_query.message.message_thread_id = 42
     with patch("bot.get_preservation_status") as status:
         await press(update, context, data=data)
         status.assert_not_called()
+
+
+
+@pytest.mark.asyncio
+async def test_done_saves_without_an_additional_confirmation_screen(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "pick", 3)
+    keyboard = update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+    assert any(button.text == "Готово — сохранить" for row in keyboard.inline_keyboard for button in row)
+    data = data_for(context, "done")
+    workflow[2].assert_not_called()
+    await press(update, context, data=data)
+    workflow[2].assert_called_once_with("https://example.com", 2, {3: "Knots"})
+    assert draft(context).purpose == "preservation"
+    keyboard = update.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+    assert all(button.text != "Сохранить" for row in keyboard.inline_keyboard for button in row)
+    await press(update, context, data=data)
+    workflow[2].assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cancel_in_tag_menu_invalidates_direct_save_button(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "pick", 3)
+    data = data_for(context, "done")
+    await press(update, context, "cancel")
+    await press(update, context, data=data)
+    workflow[2].assert_not_called()

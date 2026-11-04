@@ -168,9 +168,10 @@ class Draft:
                     text += "Теги по умолчанию для текущего чата/темы\n"
                 else:
                     text += f"Коллекция: {self.collections[self.collection][:200]} (#{self.collection})\n"
-                text += "Отметьте теги и нажмите «Готово»"
+                text += ("Отметьте теги и нажмите «Готово — сохранить»"
+                         if self.purpose == "save" else "Отметьте теги и нажмите «Готово»")
                 if not items:
-                    text += "\nДоступных тегов нет. Можно сохранить пустой список."
+                    text += "\nДоступных тегов нет. Можно продолжить без тегов."
             else:
                 items = self.chosen
                 if self.purpose == "default_tags":
@@ -195,7 +196,7 @@ class Draft:
                     nav.append(button("→", "next"))
                 rows.append(nav)
             if self.stage == "tags":
-                rows.append([button("Готово", "done")])
+                rows.append([button("Готово — сохранить" if self.purpose == "save" else "Готово", "done")])
             elif self.stage == "confirm" and self.purpose == "default_tags":
                 rows.append([button("Сохранить настройки", "tags_save")])
             elif self.stage == "confirm":
