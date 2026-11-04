@@ -985,6 +985,9 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
                 link_id, created = await asyncio.to_thread(
                     save_once, draft.url, draft.collection, draft.chosen
                 )
+                if not created and update.effective_chat.type in ("group", "supergroup"):
+                    await query.edit_message_text(text="Эта ссылка уже есть в Linkwarden.")
+                    return
                 reply = await saved_link_reply(link_id, created, draft)
                 status_draft = replace(
                     draft, purpose="preservation", actions={}, busy=False,

@@ -130,7 +130,7 @@ The [detailed Russian guide](README.ru.md) covers API behavior, persistence, and
 
 - Members of the configured group can save and search links. Collection and tag creation, settings, and imports are owner-only. Only the original requester can operate a menu.
 - Selection sessions expire after one hour or a bot restart. Settings and import jobs persist; imports must be resumed manually after a restart.
-- Duplicate checks compare exact URL strings. Existing bookmarks keep their metadata. If an API write has an uncertain outcome, the bot checks for the object before allowing further action.
+- Duplicate checks compare exact URL strings. Existing bookmarks keep their metadata. In groups, duplicate responses do not reveal the existing bookmark's ID, collection, tags, or archive status. If an API write has an uncertain outcome, the bot checks for the object before allowing further action.
 - Screenshots and other archives are created by **Linkwarden itself**, according to its preservation settings. The bot reports API status and does not inspect screenshot content.
 - An unavailable archive may mean that a format is disabled or that preservation failed on the Linkwarden side.
 

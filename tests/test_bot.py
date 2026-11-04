@@ -1641,3 +1641,18 @@ async def test_old_keyboard_cleanup_failure_keeps_new_menu_usable(update, contex
     update.callback_query.message.message_id = draft(context).message_id
     await press(update, context, "done")
     workflow[2].assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_group_duplicate_does_not_reveal_metadata_id_or_status(update, context, workflow):
+    group(update, user_id=200, thread=9)
+    workflow[2].return_value = (91, False)
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    with patch("bot.get_link_metadata") as metadata, patch("bot.get_preservation_status") as status:
+        await press(update, context, "done")
+    reply = update.callback_query.edit_message_text.await_args
+    assert reply.kwargs == {"text": "Эта ссылка уже есть в Linkwarden."}
+    metadata.assert_not_called()
+    status.assert_not_called()
+    assert not context.bot_data["selection_sessions"]
