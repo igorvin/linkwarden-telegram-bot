@@ -2,6 +2,8 @@
 
 A Telegram bot that integrates with Linkwarden to save bookmarks directly from Telegram.
 
+Полное руководство на русском со всеми командами и возможностями: [README.ru.md](README.ru.md).
+
 ## Features
 
 - Save links to your Linkwarden collection
