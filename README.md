@@ -1,79 +1,83 @@
 # Linkwarden Telegram Bot
 
-Сохраняйте ссылки из Telegram в свой Linkwarden: выбирайте коллекцию и теги прямо в чате, организуйте ссылки по темам группы и находите сохранённое через бота.
+[Read the Russian guide](README.ru.md)
 
-**Отправьте ссылку → выберите коллекцию → отметьте теги → нажмите «Готово — сохранить».**
+Save links from Telegram to your own Linkwarden instance. Choose a collection and tags in chat, organize bookmarks by group topic, and search your saved links without leaving Telegram.
 
-[Подробное руководство](README.ru.md) · [Команды](#команды) · [Установка](#быстрый-старт-с-docker-compose) · [Исходный проект](https://github.com/orguetta/linkwarden-telegram-bot)
+**Send a link → choose a collection → select tags → Done and save.**
 
-## Автор исходного проекта
+[What's new](#whats-new-in-this-fork) · [Commands](#commands) · [Quick start](#quick-start-with-docker-compose) · [Original project](https://github.com/orguetta/linkwarden-telegram-bot)
 
-Этот форк основан на коде **[orguetta/linkwarden-telegram-bot](https://github.com/orguetta/linkwarden-telegram-bot)**. Спасибо **orguetta** и участникам исходного проекта за основу интеграции Telegram с Linkwarden, обработку ссылок, ограничение частоты запросов и проверки URL.
+## Built on the original project
 
-В этом репозитории развиваются интерактивный выбор коллекций и тегов, работа с темами групп, импорт, поиск и надёжное сохранение состояния. Исходная лицензия [Apache 2.0](LICENSE) сохранена.
+This fork is based on **[orguetta/linkwarden-telegram-bot](https://github.com/orguetta/linkwarden-telegram-bot)**. Thank you to **orguetta** and the original contributors for the Telegram-to-Linkwarden integration, URL handling, rate limiting, and URL safety checks.
 
-## Что добавлено в этом форке
+This repository extends that foundation with interactive collection and tag selection, group topics, imports, search, and persistent state. The original [Apache 2.0 license](LICENSE) is preserved.
 
-Сравнение относится к исходной версии, от которой началась разработка форка: [`bfd10d8`](https://github.com/orguetta/linkwarden-telegram-bot/tree/bfd10d807399f392b41f2f38dec9fd50f3a40391).
+## What's new in this fork
 
-| Задача | Исходная версия | Этот форк |
+The comparison below uses the original version this fork started from: [`bfd10d8`](https://github.com/orguetta/linkwarden-telegram-bot/tree/bfd10d807399f392b41f2f38dec9fd50f3a40391).
+
+| Task | Original version | This fork |
 |---|---|---|
-| Выбрать коллекцию | Одна коллекция из `LINKWARDEN_COLLECTION_ID` | Актуальный список из API и выбор кнопками |
-| Сохранить ссылку | Автоматически после получения сообщения | После выбора тегов и нажатия «Готово — сохранить» |
-| Добавить теги | Нет интерактивного меню | Выбор нуля, одного или нескольких тегов |
-| Создать коллекцию или тег | Нет такого сценария в Telegram | Кнопки создания с вводом названия и возвратом к выбору |
-| Организовать темы группы | Нет команд привязки тем | `/bind`, `/unbind`, отдельные настройки и теги по умолчанию для каждой темы |
-| Импортировать старые ссылки | Нет импорта экспорта Telegram | `/scan`: предварительный просмотр, подтверждение, продолжение и отмена |
-| Найти сохранённое | Нет команды поиска | `/search` со страницами и открытием ссылок |
-| Управлять доступом | Нет модели владельца и авторских сессий | Владелец в личном чате, участники разрешённой группы, кнопки только для автора |
-| Обработать повторную отправку | Нет постоянного журнала отправок | SQLite-журнал, проверка существующих ссылок и защита от повторного POST при неизвестном результате |
-| Проверить архивирование | Нет интерактивного статуса | Состояния архивов Linkwarden, автоматическое обновление и кнопка проверки |
+| Choose a collection | One collection configured through `LINKWARDEN_COLLECTION_ID` | Fetch available collections from the API and choose with inline buttons |
+| Save a link | Automatically on receipt | Save when you finish selecting tags and click Done and save |
+| Add tags | No interactive tag picker | Select zero, one, or multiple existing tags |
+| Create a collection or tag | No creation flow in Telegram | Create by name, then return to the selection menu |
+| Organize group topics | No topic binding commands | `/bind`, `/unbind`, independent settings, and default tags per topic |
+| Import older links | No Telegram export import | `/scan` with preview, confirmation, resume, and cancellation |
+| Find saved links | No search command | Paginated `/search` results with buttons to open bookmarks |
+| Control access | No owner and submitter-bound session model | Owner-only private chat, one allowed group, and buttons restricted to the requester |
+| Handle repeated submissions | No persistent submission journal | SQLite journal, existing-link checks, and no repeated POST while an outcome is uncertain |
+| Check preservation | No interactive archive status | Linkwarden archive status, automatic updates, and manual refresh |
 
-## Как пользоваться
+## Everyday use
 
-### Сохранить ссылку
+Button names below are English descriptions; the bot's current interface uses Russian labels.
 
-1. Отправьте боту ссылку в личном чате или разрешённой группе.
-2. Выберите коллекцию. Если тема уже привязана к коллекции, бот сразу покажет теги.
-3. Отметьте нужные теги. Можно не выбирать ни одного.
-4. Нажмите **«Готово — сохранить»**. Дополнительного экрана подтверждения не будет.
+### Save a link
 
-Бот пришлёт результат с кнопкой **«Открыть в Linkwarden»** и состоянием архивов. Для нескольких URL откроются отдельные меню. **«Назад»** позволяет изменить выбор, **«Отмена»** закрывает черновик. Ответы остаются в исходной теме группы.
+1. Send a URL in your private chat with the bot or in the configured group.
+2. Choose a collection. If the topic already has a collection binding, the bot skips straight to tags.
+3. Select any tags you want, or leave them all unchecked.
+4. Click **Done and save**. The link is saved immediately, with no additional confirmation screen.
 
-### Создать коллекцию или тег
+The result includes an **Open in Linkwarden** button and archive status. A message containing several URLs gets a separate menu for each link. **Back** lets you change the collection when the topic is unbound; **Cancel** discards the draft. Replies stay in the original group topic.
 
-Владелец бота видит кнопки **«Новая коллекция»** и **«Новый тег»** в соответствующих меню. Нажмите кнопку и **ответьте на запрос бота названием**.
+### Create a collection or tag
 
-Созданная коллекция выбирается автоматически. После создания тега бот отправляет новое меню под вашим ответом: новый тег уже отмечен, прежний выбор сохранён. Можно добавить ещё один тег или сохранить ссылку.
+The bot owner sees **New collection** and **New tag** in their respective menus. Click the button, then **reply to the bot's prompt with a name**.
 
-Создание элемента само по себе не сохраняет ссылку. Отмена черновика не удаляет уже созданный элемент из Linkwarden.
+A new collection is selected automatically. After creating a tag, the bot sends a fresh menu below your reply: the new tag is checked and your previous selections remain. You can add another tag, change your selection, or save the link.
 
-### Организовать тему группы
+Creating a collection or tag does not save the URL. Cancelling a draft does not delete items already created in Linkwarden.
 
-Например, откройте тему «Fishing», выполните `/bind` и выберите коллекцию для рыбалки. Новые ссылки из этой темы будут сразу переходить к выбору тегов для указанной коллекции.
+### Organize a group topic
 
-Через `/settings` задайте теги по умолчанию. Они будут отмечены в новых черновиках, но автор сможет изменить выбор. `/unbind` удаляет привязку только текущей темы или личного чата после подтверждения.
+For example, open your Fishing topic, run `/bind`, and select your fishing collection. New links in that topic will go directly to tag selection for that collection.
 
-## Команды
+Use `/settings` to choose default tags. New drafts preselect those tags, and submitters can change the selection. `/unbind` removes only the current topic's or private chat's binding after confirmation.
 
-| Команда | Что делает | Доступ |
+## Commands
+
+| Command | What it does | Who can use it |
 |---|---|---|
-| `/start` | Показывает краткую подсказку | Разрешённые пользователи |
-| `/bind` | Привязывает текущую тему или личный чат к коллекции | Владелец |
-| `/unbind` | Удаляет привязку текущей темы или личного чата | Владелец |
-| `/settings` | Открывает привязку коллекции и теги по умолчанию | Владелец |
-| `/search текст` | Ищет ссылки, показывает страницы результатов и кнопки открытия | Разрешённые пользователи |
-| `/scan` | Импортирует ссылки из JSON-экспорта Telegram; позволяет продолжить или отменить задание | Владелец, в теме группы кроме General |
+| `/start` | Show a short introduction | Authorized users |
+| `/bind` | Bind the current topic or private chat to a collection | Owner |
+| `/unbind` | Remove the current topic's or private chat's binding | Owner |
+| `/settings` | Manage the collection binding and default tags | Owner |
+| `/search text` | Search bookmarks, browse result pages, and open links | Authorized users |
+| `/scan` | Import a Telegram JSON export; resume or cancel an import | Owner, in a group topic other than General |
 
-**Поиск:** в группе выполняется только в коллекции, привязанной к текущей теме. В личном чате владельца охватывает коллекции, доступные API-аккаунту.
+**Search:** group searches are restricted to the collection bound to the current topic. In the owner's private chat, searches cover collections visible to the API account.
 
-**Импорт:** бот не читает историю чата напрямую. Выполните `/scan`, загрузите `result.json` из Telegram Desktop в той же теме, проверьте параметры и нажмите **«Начать импорт»**. Уже существующие ссылки пропускаются. При ошибке импорт приостанавливается; продолжить можно через `/scan`. Лимит файла — 10 МиБ. [Подробнее об импорте](README.ru.md#импорт-старых-ссылок).
+**Import:** the bot cannot read old chat history directly. Run `/scan`, upload `result.json` from a Telegram Desktop export in the same topic, review the collection and tags, then click **Start import**. Existing links are skipped. Imports pause on an API error and can be resumed with `/scan`. The file limit is 10 MiB. See the [detailed Russian guide](README.ru.md) for topic detection and other import limits.
 
-## Быстрый старт с Docker Compose
+## Quick start with Docker Compose
 
-Понадобятся работающий Linkwarden с API-токеном, Telegram-бот и его токен, ваш числовой Telegram User ID, Docker с Compose.
+You need a running Linkwarden instance and API token, a Telegram bot and its token, your numeric Telegram user ID, and Docker with Compose.
 
-### 1. Получите код
+### 1. Get the code
 
 ```bash
 git clone https://github.com/igorvin/linkwarden-telegram-bot.git
@@ -81,7 +85,7 @@ cd linkwarden-telegram-bot
 cp example.env .env
 ```
 
-### 2. Заполните `.env`
+### 2. Configure `.env`
 
 ```dotenv
 TELEGRAM_TOKEN=your-telegram-bot-token
@@ -89,58 +93,58 @@ LINKWARDEN_API_URL=https://linkwarden.example.com
 LINKWARDEN_API_KEY=your-linkwarden-api-token
 ALLOWED_TELEGRAM_USER_ID=123456789
 
-# Необязательно: одна разрешённая группа. 0 отключает группы.
+# Optional: one allowed group. Set to 0 to disable group access.
 ALLOWED_TELEGRAM_GROUP_ID=0
 ```
 
-Для группы укажите её числовой ID и настройте Telegram Privacy Mode так, чтобы бот получал сообщения со ссылками. Личный чат доступен только `ALLOWED_TELEGRAM_USER_ID`. `LINKWARDEN_COLLECTION_ID` в этом форке не требуется: коллекции выбираются через меню или `/bind`.
+To use a group, enter its numeric ID and configure Telegram Privacy Mode so the bot receives messages containing links. Private chat is restricted to `ALLOWED_TELEGRAM_USER_ID`. This fork does not require `LINKWARDEN_COLLECTION_ID`: choose collections through the menu or `/bind`.
 
-### 3. Запустите бота
+### 3. Start the bot
 
-Для новой установки:
+For a new installation:
 
 ```bash
 docker compose up --build -d
 ```
 
-Откройте чат с ботом, отправьте `/start`, затем ссылку. При обновлении существующей установки сначала сохраните резервную копию базы и учитывайте, что перезапуск завершает открытые меню.
+Open the bot in Telegram, send `/start`, then send a link. When updating an existing installation, back up the state database first and remember that restarting ends open selection sessions.
 
-### Основные настройки
+### Main settings
 
-| Переменная | Для чего нужна |
+| Variable | Purpose |
 |---|---|
-| `TELEGRAM_TOKEN` | Токен Telegram-бота, обязателен |
-| `LINKWARDEN_API_URL` | Базовый адрес Linkwarden без `/api/v1`, обязателен |
-| `LINKWARDEN_API_KEY` | API-токен Linkwarden, обязателен |
-| `ALLOWED_TELEGRAM_USER_ID` | Числовой ID владельца, обязателен |
-| `ALLOWED_TELEGRAM_GROUP_ID` | Одна разрешённая группа; по умолчанию `0` |
-| `LINKWARDEN_PUBLIC_URL` | Адрес для кнопок открытия, если отличается от API-адреса |
-| `TELEGRAM_TOPIC_COLLECTIONS` | Необязательные начальные привязки тем в JSON; команды имеют приоритет |
-| `BOT_STATE_PATH` | Путь SQLite; Compose использует `/app/data/submissions.sqlite3` |
+| `TELEGRAM_TOKEN` | Telegram bot token; required |
+| `LINKWARDEN_API_URL` | Linkwarden base URL without `/api/v1`; required |
+| `LINKWARDEN_API_KEY` | Linkwarden API token; required |
+| `ALLOWED_TELEGRAM_USER_ID` | Numeric owner ID; required |
+| `ALLOWED_TELEGRAM_GROUP_ID` | One allowed group; defaults to `0` |
+| `LINKWARDEN_PUBLIC_URL` | Browser-facing address for open buttons, if different from the API address |
+| `TELEGRAM_TOPIC_COLLECTIONS` | Optional initial topic bindings as JSON; saved command settings take precedence |
+| `BOT_STATE_PATH` | SQLite path; Compose uses `/app/data/submissions.sqlite3` |
 
-Привязки, теги по умолчанию, журнал отправок и задания импорта хранятся в постоянном томе `bot-state`. **Сохраняйте этот том при обновлениях.** Не публикуйте `.env`, API-токены или экспорт переписки.
+Bindings, default tags, the submission journal, and import jobs are stored in the persistent `bot-state` volume. **Keep this volume when updating.** Never publish `.env`, tokens, or chat exports.
 
-Полное описание поведения, API и ограничений — в [подробном руководстве](README.ru.md).
+The [detailed Russian guide](README.ru.md) covers API behavior, persistence, and operational limits.
 
-## Что важно знать
+## Good to know
 
-- Участники настроенной группы могут сохранять и искать ссылки. Создание тегов и коллекций, настройки и импорт доступны только владельцу. Каждое меню может использовать только его автор.
-- Сессии меню действуют один час и завершаются при перезапуске. Настройки и задания импорта сохраняются; импорт после перезапуска нужно продолжить вручную.
-- Дубликаты определяются по точной строке URL. Параметры уже существующей ссылки не меняются. После неопределённого результата API бот проверяет наличие объекта перед дальнейшими действиями.
-- Скриншоты и другие архивы создаёт **сам Linkwarden** согласно своим настройкам. Бот показывает состояние через API; качество содержимого скриншота он не проверяет.
-- Сообщение о недоступном архиве может означать как отключённый формат, так и ошибку обработки на стороне Linkwarden.
+- Members of the configured group can save and search links. Collection and tag creation, settings, and imports are owner-only. Only the original requester can operate a menu.
+- Selection sessions expire after one hour or a bot restart. Settings and import jobs persist; imports must be resumed manually after a restart.
+- Duplicate checks compare exact URL strings. Existing bookmarks keep their metadata. If an API write has an uncertain outcome, the bot checks for the object before allowing further action.
+- Screenshots and other archives are created by **Linkwarden itself**, according to its preservation settings. The bot reports API status and does not inspect screenshot content.
+- An unavailable archive may mean that a format is disabled or that preservation failed on the Linkwarden side.
 
-## Проверки для разработчиков
+## Development checks
 
-Установите зависимости из `requirements.txt` в отдельное Python-окружение и выполните:
+Install `requirements.txt` in a separate Python environment, then run:
 
 ```bash
 python -m compileall -q bot.py linkwarden.py selection.py submissions.py scan_export.py scan_jobs.py
 python -m pytest -q -p no:cacheprovider -o asyncio_default_fixture_loop_scope=function
 ```
 
-Тесты покрывают API, авторизацию и callbacks, выбор коллекций и тегов, создание новых элементов, привязки, настройки, поиск, импорт и обработку повторных отправок.
+Tests cover API handling, authorization and callbacks, collection and tag selection, creation, bindings, settings, search, imports, and duplicate-submission handling.
 
-## Лицензия и благодарности
+## License and credits
 
-[Apache License 2.0](LICENSE). Исходный проект: [orguetta/linkwarden-telegram-bot](https://github.com/orguetta/linkwarden-telegram-bot). Этот форк сохраняет историю и лицензию оригинала и развивает описанные выше возможности.
+[Apache License 2.0](LICENSE). Original project: [orguetta/linkwarden-telegram-bot](https://github.com/orguetta/linkwarden-telegram-bot). This fork preserves the original history and license while adding the features described above.
