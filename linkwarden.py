@@ -217,3 +217,41 @@ def get_preservation_status(link_id):
             status = "❔ неизвестно"
         lines.append(f"{label}: {status}")
     return tuple(lines), pending
+
+
+def metadata_name(value, kind):
+    if kind not in ("collection", "tag") or not isinstance(value, str):
+        raise ApiError("Некорректное название.")
+    name = value.strip()
+    limit = 2048 if kind == "collection" else 50
+    try:
+        length = len(name.encode("utf-16-le")) // 2
+    except UnicodeError as error:
+        raise ApiError("Название содержит некорректные символы.") from error
+    if not name or length > limit or any(ord(character) < 32 for character in name):
+        raise ApiError(f"Введите название в одну строку, от 1 до {limit} символов.")
+    return name
+
+
+def create_collection(name):
+    name = metadata_name(name, "collection")
+    row = request("POST", "collections", json={"name": name}).get("response")
+    if (not isinstance(row, dict) or type(row.get("id")) is not int
+            or row["id"] <= 0 or row.get("name") != name):
+        raise ApiError("Linkwarden не подтвердил создание коллекции.", outcome_unknown=True)
+    return row["id"]
+
+
+def create_tag(name):
+    name = metadata_name(name, "tag")
+    rows = request("POST", "tags", json={"tags": [{"label": name}]}).get("response")
+    try:
+        names = options(rows)
+    except ApiError as error:
+        raise ApiError("Linkwarden не подтвердил создание тега.", outcome_unknown=True) from error
+    if len(names) != 1:
+        raise ApiError("Linkwarden не подтвердил создание тега.", outcome_unknown=True)
+    tag_id, actual_name = next(iter(names.items()))
+    if tag_id <= 0 or actual_name != name:
+        raise ApiError("Linkwarden не подтвердил создание тега.", outcome_unknown=True)
+    return tag_id

@@ -3,14 +3,14 @@ import logging
 import time
 import asyncio
 import sys
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, CallbackContext
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, ReplyParameters
+from telegram.ext import Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, MessageHandler, filters, CallbackContext
 from telegram.error import Conflict, TelegramError, TimedOut, NetworkError
 from linkwarden import ApiError, get_collections, get_tags, get_link_metadata, public_link_url, search_links, get_preservation_status
-from submissions import save_once, get_binding, set_binding, get_default_tags, set_default_tags
+from submissions import save_once, get_binding, set_binding, get_default_tags, set_default_tags, create_named_item
 from scan_export import ExportError, MAX_EXPORT_BYTES, parse_export
 from scan_jobs import ScanStore, progress_text
-from selection import Draft, SESSION_TTL, SEARCH_PAGE_SIZE, parse_topic_collections
+from selection import Draft, SESSION_TTL, SEARCH_PAGE_SIZE, PAGE_SIZE, parse_topic_collections
 from dataclasses import replace
 import re
 from urllib.parse import urlparse
@@ -247,7 +247,8 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
                and draft.url == link for draft in sessions.values()):
             continue
         draft = Draft(link, collections, user_id, chat_id, thread_id,
-                      original.message_id, error=error, bound_collection=bound_collection)
+                      original.message_id, error=error, bound_collection=bound_collection,
+                      can_create=user_id == ALLOWED_TELEGRAM_USER_ID)
         if bound_collection is not None and not error:
             await select_bound_collection(draft)
         # Register before sending. A timed-out send may still deliver its buttons.
@@ -299,7 +300,8 @@ async def binding_command(update: Update, context: CallbackContext, purpose: str
         collections, error = await load_collections()
     draft = Draft("", collections, update.effective_user.id, update.effective_chat.id,
                   original.message_thread_id, original.message_id, purpose=purpose, error=error,
-                  bound_collection=bound, stage="confirm" if purpose == "unbind" else "collections")
+                  bound_collection=bound, stage="confirm" if purpose == "unbind" else "collections",
+                  can_create=True)
     sessions = active_sessions(context)
     sessions[draft.session_id] = draft
     try:
@@ -450,6 +452,7 @@ async def settings_chat(update: Update, context: CallbackContext) -> None:
 
 
 async def send_draft(update, context, draft):
+    draft.can_create = draft.owner_id == ALLOWED_TELEGRAM_USER_ID
     sessions = active_sessions(context)
     sessions[draft.session_id] = draft
     try:
@@ -595,6 +598,84 @@ async def run_scan(job_id, context):
 
 
 
+
+async def route_creation_reply(update: Update, context: CallbackContext) -> None:
+    if await handle_creation_reply(update, context):
+        raise ApplicationHandlerStop
+
+
+async def handle_creation_reply(update: Update, context: CallbackContext) -> bool:
+    if not is_authorized(update) or update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
+        return False
+    message = update.effective_message
+    reply = message.reply_to_message
+    if reply is None:
+        return False
+    sessions = active_sessions(context)
+    draft = next((item for item in sessions.values()
+                  if item.creation_kind and item.creation_prompt_id == reply.message_id
+                  and item.owner_id == update.effective_user.id
+                  and item.chat_id == update.effective_chat.id
+                  and item.thread_id == message.message_thread_id), None)
+    if draft is None:
+        if (reply.from_user is not None and reply.from_user.id == context.bot.id
+                and isinstance(reply.text, str)
+                and reply.text.startswith(("Введите название нового тега", "Введите название новой коллекции"))):
+            await send_message_with_retry(update, context, "Сессия ввода истекла. Откройте выбор и повторите создание.")
+            return True
+        return False
+    if draft.busy:
+        await send_message_with_retry(update, context, "Создание уже выполняется.")
+        return True
+    if not check_rate_limit(update.effective_user.id):
+        await send_message_with_retry(update, context, "Слишком много запросов. Повторите позже.")
+        return True
+    draft.busy = True
+    try:
+        changed = replace(draft, actions={}, busy=False)
+        try:
+            item_id, name = await asyncio.to_thread(create_named_item, draft.creation_kind, message.text)
+        except ApiError as error:
+            changed.error = str(error)
+            if error.outcome_unknown:
+                changed.error += " Проверьте Linkwarden перед повторной попыткой."
+            await context.bot.edit_message_text(
+                chat_id=draft.chat_id, message_id=draft.message_id, **changed.view()
+            )
+            sessions[draft.session_id] = changed
+            return True
+        changed.creation_kind = ""
+        changed.creation_prompt_id = None
+        changed.error = ""
+        changed.page = 0
+        if draft.creation_kind == "collection":
+            changed.collections = dict(draft.collections)
+            changed.collections[item_id] = name
+            changed.collection = item_id
+            if draft.purpose == "bind":
+                changed.stage = "confirm"
+            else:
+                await load_tags(changed)
+        else:
+            changed.chosen = dict(draft.chosen)
+            changed.chosen[item_id] = name
+            await load_tags(changed)
+            changed.tags = dict(changed.tags)
+            changed.tags[item_id] = name
+            changed.chosen[item_id] = name
+            changed.stage = "tags"
+            changed.page = list(changed.tags).index(item_id) // PAGE_SIZE
+        # Creation is durable even if Telegram rejects this edit. Retain the
+        # selected object so an old prompt cannot create a second one.
+        sessions[draft.session_id] = changed
+        await context.bot.edit_message_text(
+            chat_id=draft.chat_id, message_id=draft.message_id, **changed.view()
+        )
+        return True
+    finally:
+        draft.busy = False
+
+
 async def load_preservation(draft):
     try:
         lines, pending = await asyncio.to_thread(get_preservation_status, draft.preservation_link_id)
@@ -726,6 +807,29 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
         if operation == "cancel":
             del sessions[draft.session_id]
             await query.edit_message_text("Отменено.")
+            return
+        if operation == "creation_back":
+            changed = replace(draft, creation_kind="", creation_prompt_id=None,
+                              actions={}, busy=False, error="")
+            await query.edit_message_text(**changed.view())
+            sessions[draft.session_id] = changed
+            return
+        if operation in ("new_collection", "new_tag"):
+            if update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
+                await answer_callback(query, "Создание доступно только владельцу бота.")
+                return
+            kind = "collection" if operation == "new_collection" else "tag"
+            changed = replace(draft, creation_kind=kind, actions={}, busy=False, error="")
+            prompt = await context.bot.send_message(
+                chat_id=draft.chat_id, message_thread_id=draft.thread_id,
+                text=("Введите название новой коллекции (до 2048 символов)." if kind == "collection"
+                      else "Введите название нового тега (до 50 символов)."),
+                reply_parameters=ReplyParameters(message_id=draft.source_message_id, allow_sending_without_reply=True),
+                reply_markup=ForceReply(selective=True, input_field_placeholder="Название")
+            )
+            changed.creation_prompt_id = prompt.message_id
+            sessions[draft.session_id] = changed
+            await query.edit_message_text(**changed.view())
             return
         if operation == "preservation_refresh":
             changed = replace(draft, actions={}, busy=False)
@@ -1011,6 +1115,7 @@ async def error_handler(
 def main() -> None:
     application = Application.builder().token(TELEGRAM_TOKEN).concurrent_updates(False).build()
 
+    application.add_handler(MessageHandler(filters.TEXT, route_creation_reply), group=-1)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("bind", bind_chat))
     application.add_handler(CommandHandler("unbind", unbind_chat))

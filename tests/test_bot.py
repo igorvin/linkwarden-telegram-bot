@@ -1407,3 +1407,165 @@ async def test_cancel_in_tag_menu_invalidates_direct_save_button(update, context
     await press(update, context, "cancel")
     await press(update, context, data=data)
     workflow[2].assert_not_called()
+
+
+async def begin_creation(update, context, action):
+    context.bot.id = 77
+    context.bot.send_message.return_value.message_id = 66
+    context.bot.edit_message_text = AsyncMock()
+    await press(update, context, action)
+    update.message.reply_to_message = SimpleNamespace(
+        message_id=66, from_user=SimpleNamespace(id=77),
+        text=context.bot.send_message.await_args.kwargs["text"],
+    )
+    update.message.message_id = 24
+
+
+@pytest.mark.asyncio
+async def test_new_collection_is_selected_without_saving_url(update, context, workflow):
+    await bot.handle_message(update, context)
+    await begin_creation(update, context, "new_collection")
+    prompt = context.bot.send_message.await_args.kwargs
+    assert prompt["reply_parameters"].message_id == 23
+    assert prompt["reply_markup"].selective
+    update.message.text = "Trips"
+    with patch("bot.create_named_item", return_value=(9, "Trips")) as create:
+        assert await bot.handle_creation_reply(update, context)
+        create.assert_called_once_with("collection", "Trips")
+    assert draft(context).collection == 9 and draft(context).stage == "tags"
+    workflow[2].assert_not_called()
+    await press(update, context, "done")
+    workflow[2].assert_called_once_with("https://example.com", 9, {})
+
+
+@pytest.mark.asyncio
+async def test_new_tag_is_checked_and_prior_choices_remain(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "pick", 3)
+    await begin_creation(update, context, "new_tag")
+    update.message.text = "New tag"
+    with patch("bot.create_named_item", return_value=(9, "New tag")):
+        assert await bot.handle_creation_reply(update, context)
+    assert draft(context).chosen == {3: "Knots", 9: "New tag"}
+    workflow[2].assert_not_called()
+    await press(update, context, "done")
+    workflow[2].assert_called_once_with("https://example.com", 2, {3: "Knots", 9: "New tag"})
+
+
+@pytest.mark.asyncio
+async def test_metadata_creation_not_offered_to_normal_member(update, context, workflow):
+    group(update, user_id=200, thread=9)
+    await bot.handle_message(update, context)
+    assert ("new_collection", None) not in draft(context).actions.values()
+    await press(update, context, "pick", 2)
+    assert ("new_tag", None) not in draft(context).actions.values()
+
+
+@pytest.mark.asyncio
+async def test_creation_callback_rechecks_owner(update, context, workflow, monkeypatch):
+    group(update, user_id=100, thread=9)
+    await bot.handle_message(update, context)
+    data = data_for(context, "new_collection")
+    monkeypatch.setattr(bot, "ALLOWED_TELEGRAM_USER_ID", 999)
+    await press(update, context, data=data)
+    context.bot.send_message.assert_not_awaited()
+    assert not draft(context).creation_kind
+
+
+@pytest.mark.asyncio
+async def test_creation_reply_must_be_from_owner_in_same_topic(update, context, workflow):
+    group(update, user_id=100, thread=9)
+    await bot.handle_message(update, context)
+    await begin_creation(update, context, "new_collection")
+    update.message.text = "Trips"
+    with patch("bot.create_named_item") as create:
+        update.effective_user.id = 201
+        assert not await bot.handle_creation_reply(update, context)
+        update.effective_user.id = 100
+        update.message.message_thread_id = 42
+        assert await bot.handle_creation_reply(update, context)
+        create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancel_name_input_retains_selection_and_ignores_stale_reply(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await press(update, context, "pick", 3)
+    await begin_creation(update, context, "new_tag")
+    await press(update, context, "creation_back")
+    assert draft(context).chosen == {3: "Knots"} and not draft(context).creation_kind
+    update.message.text = "New tag"
+    with patch("bot.create_named_item") as create:
+        assert await bot.handle_creation_reply(update, context)
+        create.assert_not_called()
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_creation_error_keeps_prompt_for_retry(update, context, workflow):
+    await bot.handle_message(update, context)
+    await begin_creation(update, context, "new_collection")
+    update.message.text = "Trips"
+    with patch("bot.create_named_item", side_effect=[ApiError("Timeout", True), (9, "Trips")]) as create:
+        assert await bot.handle_creation_reply(update, context)
+        assert draft(context).creation_kind == "collection" and draft(context).error
+        assert await bot.handle_creation_reply(update, context)
+        assert draft(context).collection == 9 and not draft(context).creation_kind
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_creation_router_stops_url_handler_for_name_reply(update, context, workflow):
+    from telegram.ext import ApplicationHandlerStop
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await begin_creation(update, context, "new_tag")
+    update.message.text = "https://name.example"
+    with patch("bot.create_named_item", return_value=(9, "https://name.example")):
+        with pytest.raises(ApplicationHandlerStop):
+            await bot.route_creation_reply(update, context)
+    assert len(context.bot_data["selection_sessions"]) == 1
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_creation_prompt_expiry_does_not_create(update, context, workflow):
+    await bot.handle_message(update, context)
+    await begin_creation(update, context, "new_collection")
+    draft(context).created -= SESSION_TTL + 1
+    update.message.text = "Trips"
+    with patch("bot.create_named_item") as create:
+        assert await bot.handle_creation_reply(update, context)
+        create.assert_not_called()
+    assert "истекла" in update.message.reply_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_new_collection_in_bind_still_requires_binding_confirmation(update, context, workflow):
+    from submissions import get_binding
+    group(update, user_id=100, thread=9)
+    await bot.bind_chat(update, context)
+    await begin_creation(update, context, "new_collection")
+    update.message.text = "Trips"
+    with patch("bot.create_named_item", return_value=(9, "Trips")):
+        assert await bot.handle_creation_reply(update, context)
+    assert draft(context).purpose == "bind" and draft(context).stage == "confirm"
+    assert get_binding(-1001872870761, 9) is None
+
+
+@pytest.mark.asyncio
+async def test_new_tag_can_be_used_in_default_preferences(update, context, workflow):
+    from submissions import get_default_tags
+    await bot.settings_chat(update, context)
+    await press(update, context, "settings_tags")
+    await begin_creation(update, context, "new_tag")
+    update.message.text = "New tag"
+    with patch("bot.create_named_item", return_value=(9, "New tag")):
+        assert await bot.handle_creation_reply(update, context)
+    assert get_default_tags(100, None) == ()
+    workflow[1].return_value[9] = "New tag"
+    await press(update, context, "done")
+    await press(update, context, "tags_save")
+    assert get_default_tags(100, None) == (9,)

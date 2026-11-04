@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import sqlite3
 
-from linkwarden import ApiError, find_link, save_link
+from linkwarden import ApiError, find_link, save_link, get_collections, get_tags, create_collection, create_tag, metadata_name
 
 
 class SubmissionLedger:
@@ -59,6 +59,14 @@ class SubmissionLedger:
         with self.connect() as db:
             db.execute("UPDATE submissions SET state=?, link_id=? WHERE fingerprint=?",
                        (state, link_id, key))
+
+    def renew_saved(self, key, previous_id):
+        with self.connect() as db:
+            return bool(db.execute(
+                """UPDATE submissions SET state='pending', link_id=NULL
+                WHERE fingerprint=? AND state='saved' AND link_id=?""",
+                (key, previous_id),
+            ).rowcount)
 
     def release(self, key):
         with self.connect() as db:
@@ -136,3 +144,38 @@ def set_default_tags(chat_id, thread_id, tag_ids):
             ON CONFLICT(chat_id, thread_id) DO UPDATE SET default_tags=excluded.default_tags""",
             (chat_id, thread_id or 0, json.dumps(ids)),
         )
+
+
+def create_named_item(kind, value):
+    name = metadata_name(value, kind)
+    ledger = SubmissionLedger()
+    key = ledger.key(f"metadata:{kind}\0{name}")
+    claimed, state, previous_id = ledger.claim(key)
+    try:
+        choices = get_collections() if kind == "collection" else get_tags()
+    except ApiError:
+        if claimed:
+            ledger.release(key)
+        raise
+    matches = [item_id for item_id, existing in choices.items() if existing == name]
+    if len(matches) > 1:
+        if claimed:
+            ledger.release(key)
+        raise ApiError("Найдено несколько объектов с таким названием. Вернитесь к выбору существующего.")
+    if matches:
+        ledger.finish(key, "saved", matches[0])
+        return matches[0], name
+    if not claimed and state == "saved":
+        claimed = ledger.renew_saved(key, previous_id)
+    if not claimed:
+        raise ApiError("Результат предыдущего создания неизвестен. Проверьте Linkwarden и повторите то же название.")
+    try:
+        item_id = create_collection(name) if kind == "collection" else create_tag(name)
+    except ApiError as error:
+        if error.outcome_unknown:
+            ledger.finish(key, "uncertain")
+        else:
+            ledger.release(key)
+        raise
+    ledger.finish(key, "saved", item_id)
+    return item_id, name

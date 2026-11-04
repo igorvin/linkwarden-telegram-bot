@@ -131,3 +131,72 @@ def test_invalid_default_tags_are_rejected(ledger_env, ids):
     from submissions import set_default_tags
     with pytest.raises(ValueError):
         set_default_tags(-100, 9, ids)
+
+
+def test_metadata_existing_name_is_reused(ledger_env):
+    from submissions import create_named_item
+    with patch("submissions.get_collections", return_value={3: "Trips"}), patch("submissions.create_collection") as post:
+        assert create_named_item("collection", " Trips ") == (3, "Trips")
+        post.assert_not_called()
+
+
+def test_metadata_unknown_post_never_repeats_and_reconciles(ledger_env):
+    from submissions import create_named_item
+    with patch("submissions.get_collections", return_value={}), patch("submissions.create_collection", side_effect=ApiError("Timeout", True)) as post:
+        with pytest.raises(ApiError):
+            create_named_item("collection", "Trips")
+        with pytest.raises(ApiError):
+            create_named_item("collection", "Trips")
+        post.assert_called_once()
+    with patch("submissions.get_collections", return_value={9: "Trips"}), patch("submissions.create_collection") as post:
+        assert create_named_item("collection", "Trips") == (9, "Trips")
+        post.assert_not_called()
+
+
+def test_metadata_removed_object_can_be_recreated(ledger_env):
+    from submissions import create_named_item
+    with patch("submissions.get_tags", return_value={}), patch("submissions.create_tag", side_effect=[3, 9]) as post:
+        assert create_named_item("tag", "Knots") == (3, "Knots")
+        assert create_named_item("tag", "Knots") == (9, "Knots")
+        assert post.call_count == 2
+
+
+def test_metadata_duplicate_names_are_ambiguous(ledger_env):
+    from submissions import create_named_item
+    with patch("submissions.get_collections", return_value={3: "Trips", 9: "Trips"}), patch("submissions.create_collection") as post:
+        with pytest.raises(ApiError):
+            create_named_item("collection", "Trips")
+        post.assert_not_called()
+
+
+def test_metadata_get_failure_and_definite_post_rejection_are_retryable(ledger_env):
+    from submissions import create_named_item
+    with patch("submissions.get_tags", side_effect=ApiError("HTTP 503")):
+        with pytest.raises(ApiError):
+            create_named_item("tag", "Knots")
+    with patch("submissions.get_tags", return_value={}), patch("submissions.create_tag", side_effect=[ApiError("HTTP 403"), 9]):
+        with pytest.raises(ApiError):
+            create_named_item("tag", "Knots")
+        assert create_named_item("tag", "Knots") == (9, "Knots")
+
+
+def test_metadata_concurrent_creation_has_one_post(ledger_env):
+    import threading
+    from submissions import create_named_item
+    started = threading.Event()
+    release = threading.Event()
+    def create(name):
+        started.set()
+        assert release.wait(timeout=5)
+        return 9
+    with patch("submissions.get_collections", return_value={}), patch("submissions.create_collection", side_effect=create) as post:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(create_named_item, "collection", "Trips")
+            assert started.wait(timeout=5)
+            try:
+                with pytest.raises(ApiError):
+                    create_named_item("collection", "Trips")
+            finally:
+                release.set()
+            assert first.result(timeout=5) == (9, "Trips")
+        post.assert_called_once()

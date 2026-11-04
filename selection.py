@@ -34,6 +34,9 @@ class Draft:
     message_id: int | None = None
     bound_collection: int | None = None
     purpose: str = "save"
+    can_create: bool = False
+    creation_kind: str = ""
+    creation_prompt_id: int | None = None
     preservation_link_id: int | None = None
     preservation_text: str = ""
     preservation_lines: tuple = ()
@@ -69,6 +72,14 @@ class Draft:
             return InlineKeyboardButton(
                 label, callback_data=f"lw:{self.session_id}:{self.revision}:{token}"
             )
+
+        if self.creation_kind:
+            text = "Ответьте на отдельное сообщение бота названием новой коллекции." if self.creation_kind == "collection" else "Ответьте на отдельное сообщение бота названием нового тега."
+            if self.error:
+                text += "\n" + self.error
+            return {"text": text, "reply_markup": InlineKeyboardMarkup([
+                [button("Вернуться к выбору", "creation_back"), button("Отмена", "cancel")]
+            ])}
 
         if self.purpose == "preservation":
             text = self.preservation_text + "\n\nАрхивы Linkwarden\n"
@@ -201,6 +212,11 @@ class Draft:
                 rows.append([button("Сохранить настройки", "tags_save")])
             elif self.stage == "confirm":
                 rows.append([button("Начать импорт" if self.purpose == "scan" else "Сохранить", "save")])
+        if self.can_create and self.purpose in ("save", "scan", "bind", "default_tags"):
+            if self.stage == "collections":
+                rows.append([button("Новая коллекция", "new_collection")])
+            elif self.stage == "tags":
+                rows.append([button("Новый тег", "new_tag")])
         if self.stage == "confirm" or (self.stage == "tags" and self.bound_collection is None):
             rows.append([button("Назад", "back")])
         rows.append([button("Отмена", "cancel")])

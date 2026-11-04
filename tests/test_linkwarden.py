@@ -298,3 +298,51 @@ def test_preservation_unknown_value_not_exposed(transport):
     assert not pending
     assert "неизвестно" in lines[0]
     assert "secret" not in str(lines)
+
+
+def test_create_collection_payload(transport):
+    from linkwarden import create_collection
+    transport.return_value = response({"response": {"id": 9, "name": "Trips"}})
+    assert create_collection(" Trips ") == 9
+    assert transport.call_args.args == ("POST", "https://linkwarden.example.com/api/v1/collections")
+    assert transport.call_args.kwargs["json"] == {"name": "Trips"}
+
+
+def test_create_tag_payload_preserves_archive_preferences(transport):
+    from linkwarden import create_tag
+    transport.return_value = response({"response": [{"id": 9, "name": "Knots"}]})
+    assert create_tag("Knots") == 9
+    assert transport.call_args.kwargs["json"] == {"tags": [{"label": "Knots"}]}
+
+
+@pytest.mark.parametrize("kind,name", [
+    ("tag", ""), ("collection", "  "), ("tag", "x" * 51),
+    ("collection", "x" * 2049), ("tag", "line\nbreak"), ("tag", None),
+    ("tag", "🐟" * 26),
+])
+def test_metadata_names_are_validated_before_request(transport, kind, name):
+    from linkwarden import metadata_name
+    with pytest.raises(ApiError):
+        metadata_name(name, kind)
+    transport.assert_not_called()
+
+
+def test_metadata_name_utf16_limits():
+    from linkwarden import metadata_name
+    assert metadata_name("🐟" * 25, "tag") == "🐟" * 25
+    assert len(metadata_name("x" * 2048, "collection")) == 2048
+
+
+@pytest.mark.parametrize("kind,body", [
+    ("tag", {"response": []}), ("tag", {"response": [{"id": 9, "name": "Other"}]}),
+    ("tag", {"data": {"tags": [{"id": 9, "name": "Name"}]}}),
+    ("collection", {"response": {"id": True, "name": "Name"}}),
+    ("collection", {"response": {"id": 9}}),
+])
+def test_metadata_unconfirmed_post_is_unknown(transport, kind, body):
+    from linkwarden import create_tag, create_collection
+    transport.return_value = response(body)
+    with pytest.raises(ApiError) as error:
+        (create_tag if kind == "tag" else create_collection)("Name")
+    assert error.value.outcome_unknown
+    transport.assert_called_once()
