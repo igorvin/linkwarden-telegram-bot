@@ -48,6 +48,8 @@ The result includes an **Open in Linkwarden** button and archive status. A messa
 
 The bot owner sees **New collection** and **New tag** in their respective menus. Click the button, then **reply to the bot's prompt with a name**.
 
+Use Telegram's Reply action on the prompt to enter the name. The bot removes the prompt after creation or cancellation so it does not keep requesting a reply.
+
 A new collection is selected automatically. After creating a tag, the bot sends a fresh menu below your reply: the new tag is checked and your previous selections remain. You can add another tag, change your selection, or save the link.
 
 Creating a collection or tag does not save the URL. Cancelling a draft does not delete items already created in Linkwarden.

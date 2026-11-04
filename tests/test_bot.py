@@ -52,6 +52,7 @@ def context():
     context.bot_data = {}
     context.bot.send_message = AsyncMock()
     context.bot.edit_message_reply_markup = AsyncMock()
+    context.bot.delete_message = AsyncMock()
     return context
 
 
@@ -1428,7 +1429,8 @@ async def test_new_collection_is_selected_without_saving_url(update, context, wo
     await begin_creation(update, context, "new_collection")
     prompt = context.bot.send_message.await_args.kwargs
     assert prompt["reply_parameters"].message_id == 23
-    assert prompt["reply_markup"].selective
+    assert "Ответьте на это сообщение" in prompt["text"]
+    assert "reply_markup" not in prompt
     update.message.text = "Trips"
     with patch("bot.create_named_item", return_value=(9, "Trips")) as create:
         assert await bot.handle_creation_reply(update, context)
@@ -1450,6 +1452,7 @@ async def test_new_tag_is_checked_and_prior_choices_remain(update, context, work
     with patch("bot.create_named_item", return_value=(9, "New tag")):
         assert await bot.handle_creation_reply(update, context)
     assert draft(context).chosen == {3: "Knots", 9: "New tag"}
+    context.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=66)
     menu = context.bot.send_message.await_args.kwargs
     assert menu["reply_parameters"].message_id == 24
     buttons = [button.text for row in menu["reply_markup"].inline_keyboard for button in row]
@@ -1509,6 +1512,7 @@ async def test_cancel_name_input_retains_selection_and_ignores_stale_reply(updat
     await press(update, context, "pick", 3)
     await begin_creation(update, context, "new_tag")
     await press(update, context, "creation_back")
+    context.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=66)
     assert draft(context).chosen == {3: "Knots"} and not draft(context).creation_kind
     update.message.text = "New tag"
     with patch("bot.create_named_item") as create:
@@ -1656,3 +1660,26 @@ async def test_group_duplicate_does_not_reveal_metadata_id_or_status(update, con
     metadata.assert_not_called()
     status.assert_not_called()
     assert not context.bot_data["selection_sessions"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_creation_removes_prompt(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await begin_creation(update, context, "new_tag")
+    await press(update, context, "cancel")
+    context.bot.delete_message.assert_awaited_once_with(chat_id=100, message_id=66)
+    workflow[2].assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_prompt_cleanup_failure_does_not_prevent_tag_selection(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await begin_creation(update, context, "new_tag")
+    update.message.text = "New"
+    context.bot.delete_message.side_effect = NetworkError("offline")
+    with patch("bot.create_named_item", return_value=(9, "New")):
+        assert await bot.handle_creation_reply(update, context)
+    assert draft(context).chosen == {9: "New"}
+    assert draft(context).stage == "tags"

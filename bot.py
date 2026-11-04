@@ -3,7 +3,7 @@ import logging
 import time
 import asyncio
 import sys
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply, ReplyParameters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
 from telegram.ext import Application, ApplicationHandlerStop, CallbackQueryHandler, CommandHandler, MessageHandler, filters, CallbackContext
 from telegram.error import Conflict, TelegramError, TimedOut, NetworkError
 from linkwarden import ApiError, get_collections, get_tags, get_link_metadata, public_link_url, search_links, get_preservation_status
@@ -604,6 +604,14 @@ async def route_creation_reply(update: Update, context: CallbackContext) -> None
         raise ApplicationHandlerStop
 
 
+async def remove_creation_prompt(context, draft):
+    if draft.creation_prompt_id is not None:
+        try:
+            await context.bot.delete_message(chat_id=draft.chat_id, message_id=draft.creation_prompt_id)
+        except TelegramError:
+            logger.warning("Could not remove the completed creation prompt")
+
+
 async def handle_creation_reply(update: Update, context: CallbackContext) -> bool:
     if not is_authorized(update) or update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
         return False
@@ -668,6 +676,7 @@ async def handle_creation_reply(update: Update, context: CallbackContext) -> boo
         # Creation is durable even if Telegram rejects this edit. Retain the
         # selected object so an old prompt cannot create a second one.
         sessions[draft.session_id] = changed
+        await remove_creation_prompt(context, draft)
         menu = changed.view()
         try:
             sent = await context.bot.send_message(
@@ -825,6 +834,7 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
             operation = "save"
         if operation == "cancel":
             del sessions[draft.session_id]
+            await remove_creation_prompt(context, draft)
             await query.edit_message_text("Отменено.")
             return
         if operation == "creation_back":
@@ -832,6 +842,7 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
                               actions={}, busy=False, error="")
             await query.edit_message_text(**changed.view())
             sessions[draft.session_id] = changed
+            await remove_creation_prompt(context, draft)
             return
         if operation in ("new_collection", "new_tag"):
             if update.effective_user.id != ALLOWED_TELEGRAM_USER_ID:
@@ -841,10 +852,10 @@ async def handle_callback(update: Update, context: CallbackContext) -> None:
             changed = replace(draft, creation_kind=kind, actions={}, busy=False, error="")
             prompt = await context.bot.send_message(
                 chat_id=draft.chat_id, message_thread_id=draft.thread_id,
-                text=("Введите название новой коллекции (до 2048 символов)." if kind == "collection"
-                      else "Введите название нового тега (до 50 символов)."),
+                text=(("Введите название новой коллекции (до 2048 символов)." if kind == "collection"
+                      else "Введите название нового тега (до 50 символов).")
+                      + " Ответьте на это сообщение названием."),
                 reply_parameters=ReplyParameters(message_id=draft.source_message_id, allow_sending_without_reply=True),
-                reply_markup=ForceReply(selective=True, input_field_placeholder="Название")
             )
             changed.creation_prompt_id = prompt.message_id
             sessions[draft.session_id] = changed
