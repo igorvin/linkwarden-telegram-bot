@@ -668,9 +668,28 @@ async def handle_creation_reply(update: Update, context: CallbackContext) -> boo
         # Creation is durable even if Telegram rejects this edit. Retain the
         # selected object so an old prompt cannot create a second one.
         sessions[draft.session_id] = changed
-        await context.bot.edit_message_text(
-            chat_id=draft.chat_id, message_id=draft.message_id, **changed.view()
-        )
+        menu = changed.view()
+        try:
+            sent = await context.bot.send_message(
+                chat_id=changed.chat_id, message_thread_id=changed.thread_id,
+                reply_parameters=ReplyParameters(message_id=message.message_id,
+                                                 allow_sending_without_reply=True),
+                **menu,
+            )
+        except TelegramError:
+            # Keep a usable menu even when sending the new message fails.
+            await context.bot.edit_message_text(
+                chat_id=changed.chat_id, message_id=changed.message_id, **menu
+            )
+        else:
+            changed.message_id = sent.message_id
+            try:
+                await context.bot.edit_message_reply_markup(
+                    chat_id=draft.chat_id, message_id=draft.message_id, reply_markup=None
+                )
+            except TelegramError:
+                # Message ID and revision checks already reject old buttons.
+                logger.warning("Could not remove the previous creation menu")
         return True
     finally:
         draft.busy = False

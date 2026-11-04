@@ -51,6 +51,7 @@ def context():
     context = MagicMock()
     context.bot_data = {}
     context.bot.send_message = AsyncMock()
+    context.bot.edit_message_reply_markup = AsyncMock()
     return context
 
 
@@ -1434,6 +1435,7 @@ async def test_new_collection_is_selected_without_saving_url(update, context, wo
         create.assert_called_once_with("collection", "Trips")
     assert draft(context).collection == 9 and draft(context).stage == "tags"
     workflow[2].assert_not_called()
+    update.callback_query.message.message_id = draft(context).message_id
     await press(update, context, "done")
     workflow[2].assert_called_once_with("https://example.com", 9, {})
 
@@ -1448,7 +1450,19 @@ async def test_new_tag_is_checked_and_prior_choices_remain(update, context, work
     with patch("bot.create_named_item", return_value=(9, "New tag")):
         assert await bot.handle_creation_reply(update, context)
     assert draft(context).chosen == {3: "Knots", 9: "New tag"}
+    menu = context.bot.send_message.await_args.kwargs
+    assert menu["reply_parameters"].message_id == 24
+    buttons = [button.text for row in menu["reply_markup"].inline_keyboard for button in row]
+    assert "✓ New tag" in buttons
+    assert "Новый тег" in buttons and "Готово — сохранить" in buttons
+    context.bot.edit_message_reply_markup.assert_awaited_once_with(
+        chat_id=100, message_id=55, reply_markup=None
+    )
     workflow[2].assert_not_called()
+    # Buttons on the old message cannot save the link.
+    await press(update, context, "done")
+    workflow[2].assert_not_called()
+    update.callback_query.message.message_id = draft(context).message_id
     await press(update, context, "done")
     workflow[2].assert_called_once_with("https://example.com", 2, {3: "Knots", 9: "New tag"})
 
@@ -1566,6 +1580,64 @@ async def test_new_tag_can_be_used_in_default_preferences(update, context, workf
         assert await bot.handle_creation_reply(update, context)
     assert get_default_tags(100, None) == ()
     workflow[1].return_value[9] = "New tag"
+    update.callback_query.message.message_id = draft(context).message_id
     await press(update, context, "done")
     await press(update, context, "tags_save")
     assert get_default_tags(100, None) == (9,)
+
+
+@pytest.mark.asyncio
+async def test_created_tag_returns_menu_in_same_topic_and_allows_another_tag(update, context, workflow):
+    group(update, user_id=100, thread=9)
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await begin_creation(update, context, "new_tag")
+    update.message.text = "First"
+    context.bot.send_message.return_value.message_id = 67
+    with patch("bot.create_named_item", return_value=(9, "First")) as create:
+        assert await bot.handle_creation_reply(update, context)
+        assert await bot.handle_creation_reply(update, context)
+        create.assert_called_once()
+    menu = context.bot.send_message.await_args.kwargs
+    assert menu["chat_id"] == -1001872870761 and menu["message_thread_id"] == 9
+    assert draft(context).message_id == 67
+    workflow[1].return_value[9] = "First"
+    update.callback_query.message.message_id = 67
+    await begin_creation(update, context, "new_tag")
+    update.message.text = "Second"
+    context.bot.send_message.return_value.message_id = 68
+    with patch("bot.create_named_item", return_value=(10, "Second")):
+        assert await bot.handle_creation_reply(update, context)
+    assert draft(context).chosen == {9: "First", 10: "Second"}
+    update.callback_query.message.message_id = 68
+    await press(update, context, "done")
+    workflow[2].assert_called_once_with("https://example.com", 2, {9: "First", 10: "Second"})
+
+
+@pytest.mark.asyncio
+async def test_created_tag_send_failure_restores_original_menu(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await begin_creation(update, context, "new_tag")
+    update.message.text = "New"
+    context.bot.send_message.side_effect = TimedOut()
+    with patch("bot.create_named_item", return_value=(9, "New")):
+        assert await bot.handle_creation_reply(update, context)
+    assert draft(context).message_id == 55 and draft(context).stage == "tags"
+    assert context.bot.edit_message_text.await_args.kwargs["message_id"] == 55
+    await press(update, context, "done")
+    workflow[2].assert_called_once_with("https://example.com", 2, {9: "New"})
+
+
+@pytest.mark.asyncio
+async def test_old_keyboard_cleanup_failure_keeps_new_menu_usable(update, context, workflow):
+    await bot.handle_message(update, context)
+    await press(update, context, "pick", 2)
+    await begin_creation(update, context, "new_tag")
+    update.message.text = "New"
+    context.bot.edit_message_reply_markup.side_effect = NetworkError("offline")
+    with patch("bot.create_named_item", return_value=(9, "New")):
+        assert await bot.handle_creation_reply(update, context)
+    update.callback_query.message.message_id = draft(context).message_id
+    await press(update, context, "done")
+    workflow[2].assert_called_once()
